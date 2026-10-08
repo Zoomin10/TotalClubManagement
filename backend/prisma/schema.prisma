@@ -1,0 +1,42 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ConsentForm {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+
+  ageGroup          String
+  wwfcTeam          String?
+  playerFirstName   String
+  playerSurname     String
+  playerDob         DateTime
+  playerSex         String
+
+  emergencyContact1 Json
+  emergencyContact2 Json
+
+  postcode          String
+  houseNumber       String
+  email             String
+
+  medicalInfo       String
+  allergies         String?
+
+  photoUrl          String?
+
+  consentData       Boolean
+  consentPhotos     Boolean
+  consentVideos     Boolean
+  consentWalkHome   Boolean?
+  
+
+  parentSignature   String
+  parentName        String
+  signatureDate     DateTime
+}
