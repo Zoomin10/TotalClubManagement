@@ -85,7 +85,28 @@ async function completeSetup(stripe, session) {
   const startDate = Math.floor(start.toSeconds());
 
   // Do not silently backdate or immediately charge a delayed setup.
-  if (startDate <= Math.floor(Date.now() / 1000)) {
+const customer = await stripe.customers.retrieve(
+  registration.stripeCustomerId
+);
+
+if (customer.deleted) {
+  throw new Error("Stripe customer has been deleted");
+}
+
+let billingNow = Math.floor(Date.now() / 1000);
+const testClockId = objectId(customer.test_clock);
+
+if (testClockId) {
+  const clock = await stripe.testHelpers.testClocks.retrieve(testClockId);
+
+  if (clock.status !== "ready") {
+    throw new Error("Stripe test clock must be ready");
+  }
+
+  billingNow = clock.frozen_time;
+}
+
+if (!start.isValid || startDate <= billingNow) {
     throw new Error(
       "First payment date has passed; manual billing review required"
     );

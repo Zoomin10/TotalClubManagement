@@ -56,14 +56,42 @@ async function createRegistrationCheckout(registration) {
   let customerId = registration.stripeCustomerId;
 
   if (!customerId) {
-    const customer = await stripe.customers.create(
-      {
-        metadata: { registrationId: registration.id },
-      },
-      {
-        idempotencyKey: `registration-customer-${registration.id}`,
-      }
+    const testClockId = process.env.STRIPE_TEST_CLOCK_ID?.trim();
+
+if (testClockId) {
+  const clock = await stripe.testHelpers.testClocks.retrieve(testClockId);
+
+  if (clock.status !== "ready") {
+    throw new Error("Stripe test clock must be ready");
+  }
+
+  // The registration date is still calculated using real time.
+  // Keep the clock in the same month for this test.
+  const londonMonth = (seconds) =>
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      month: "2-digit",
+      year: "numeric",
+    }).format(new Date(seconds * 1000));
+
+  if (
+    londonMonth(clock.frozen_time) !==
+    londonMonth(Math.floor(Date.now() / 1000))
+  ) {
+    throw new Error(
+      "Test clock must be in the current registration month"
     );
+  }
+}
+ const customer = await stripe.customers.create(
+  {
+    metadata: { registrationId: registration.id },
+    ...(testClockId ? { test_clock: testClockId } : {}),
+  },
+  {
+    idempotencyKey: `registration-customer-${registration.id}`,
+  }
+);
 
     customerId = customer.id;
 
