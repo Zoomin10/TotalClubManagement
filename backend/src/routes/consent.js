@@ -68,7 +68,10 @@ playerDob: z.coerce.date().refine(
   }
 ),
   playerSex: z.enum(["Male", "Female"]),
-
+paymentPlan: z.enum([
+  "MATCHES_AND_TRAINING",
+  "TRAINING_ONLY",
+]),
   emergencyContact1: contactSchema,
   emergencyContact2: contactSchema,
 
@@ -140,10 +143,7 @@ router.post("/", async (req, res) => {
         playerDob: data.playerDob,
         playerSex: data.playerSex,
 
-        paymentPlan: z.enum([
-        "MATCHES_AND_TRAINING",
-        "TRAINING_ONLY",
-        ]),
+      
 
         emergencyContact1: data.emergencyContact1,
         emergencyContact2: data.emergencyContact2,
