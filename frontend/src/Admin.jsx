@@ -48,6 +48,7 @@ if (!res.ok || !contentType.includes("application/json")) {
   return;
 }
 
+
 const data = await res.json();
 setIsAuthenticated(data.authenticated === true);
   } catch (error) {
