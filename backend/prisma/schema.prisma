@@ -8,35 +8,52 @@ datasource db {
 }
 
 model ConsentForm {
-  id                String   @id @default(cuid())
-  createdAt         DateTime @default(now())
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
 
-  ageGroup          String
-  wwfcTeam          String?
-  playerFirstName   String
-  playerSurname     String
-  playerDob         DateTime
-  playerSex         String
+  ageGroup        String
+  wwfcTeam        String?
+  playerFirstName String
+  playerSurname   String
+  playerDob       DateTime
+  playerSex       String
 
   emergencyContact1 Json
   emergencyContact2 Json
 
-  postcode          String
-  houseNumber       String
-  email             String
+  postcode    String
+  houseNumber String
+  email       String
 
-  medicalInfo       String
-  allergies         String?
+  medicalInfo String
+  allergies   String?
 
-  photoUrl          String?
+  photoUrl String?
 
-  consentData       Boolean
-  consentPhotos     Boolean
-  consentVideos     Boolean
-  consentWalkHome   Boolean?
-  
+  consentData     Boolean
+  consentPhotos   Boolean
+  consentVideos   Boolean
+  consentWalkHome Boolean?
 
-  parentSignature   String
-  parentName        String
-  signatureDate     DateTime
+  parentSignature String
+  parentName      String
+  signatureDate   DateTime
+
+  // Membership payment plan
+  paymentPlan        PaymentPlan?
+  monthlyAmountPence Int?
+  firstPaymentDate   DateTime?
+
+  // Stripe references
+  stripeCustomerId        String?
+  stripeSubscriptionId    String? @unique
+  stripeCheckoutSessionId String? @unique
+
+  // Subscription state; separate from successful payment history
+  stripeSubscriptionStatus String?
+}
+
+enum PaymentPlan {
+  MATCHES_AND_TRAINING
+  TRAINING_ONLY
 }
