@@ -41,7 +41,15 @@ async function checkAuth() {
       signal: controller.signal,
     });
 
-    setIsAuthenticated(res.ok);
+const contentType = res.headers.get("content-type") || "";
+
+if (!res.ok || !contentType.includes("application/json")) {
+  setIsAuthenticated(false);
+  return;
+}
+
+const data = await res.json();
+setIsAuthenticated(data.authenticated === true);
   } catch (error) {
     if (error.name === "AbortError") {
       console.warn("Initial admin session check timed out");
