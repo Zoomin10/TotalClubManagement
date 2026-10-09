@@ -4,7 +4,7 @@ const cookieParser = require("cookie-parser");
 
 const consentRoutes = require("./routes/consent");
 const adminRoutes = require("./routes/admin");
-
+const stripeWebhookRoutes = require("./routes/stripeWebhook");
 const app = express();
 
 const allowedOrigins = [
@@ -29,7 +29,11 @@ app.use(
     exposedHeaders: ["Content-Disposition"],
   })
 );
-
+app.use(
+  "/api/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhookRoutes
+);
 app.use(express.json());
 app.use(cookieParser());
 

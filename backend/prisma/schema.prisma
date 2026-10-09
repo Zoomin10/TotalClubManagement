@@ -38,6 +38,8 @@ model ConsentForm {
   parentSignature String
   parentName      String
   signatureDate   DateTime
+  
+stripeScheduleId String? @unique
 
   // Membership payment plan
   paymentPlan        PaymentPlan?

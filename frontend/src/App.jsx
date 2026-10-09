@@ -134,9 +134,22 @@ if (!res.ok) {
 
   return;
 }
+const result = await res.json();
+
 setValidationError("");
-setStatus("Registration saved successfully. Payment setup is not yet enabled.");
 setForm(initialForm);
+
+if (result.checkoutUrl) {
+  setStatus("Registration saved. Opening secure payment setup...");
+  window.location.assign(result.checkoutUrl);
+  return;
+}
+
+setStatus(
+  `Registration saved. Payment setup could not start. ` +
+  `Please contact the club quoting reference ${result.registrationId}. ` +
+  `Do not submit another registration.`
+);
 } catch (err) {
   console.error(err);
   setStatus(

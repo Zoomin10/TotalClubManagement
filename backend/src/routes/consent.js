@@ -18,6 +18,9 @@ const ageGroups = [
   "u18",
   "adult",
 ];
+const {
+  createRegistrationCheckout,
+} = require("../services/stripeService");
 
 const {
   sendRegistrationNotification,
@@ -178,7 +181,23 @@ firstPaymentDate: getFirstPaymentDate(),
       );
     });
 
-    res.status(201).json(result);
+ let checkoutUrl = null;
+
+try {
+  checkoutUrl = await createRegistrationCheckout(result);
+} catch (error) {
+  console.error(
+    "Registration saved, but Stripe setup failed:",
+    error.message
+  );
+}
+
+res.status(201).json({
+  registrationId: result.id,
+  checkoutUrl,
+  paymentSetupRequired: true,
+});
+
   } catch (err) {
     console.error("Failed to save consent form:", err);
 
