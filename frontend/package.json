@@ -9,7 +9,7 @@
   "start": "serve -s dist",
   "lint": "eslint .",
   "preview": "vite preview"
-}
+},
   "dependencies": {
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
