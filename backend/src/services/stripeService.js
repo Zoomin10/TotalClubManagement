@@ -85,7 +85,7 @@ async function createRegistrationCheckout(registration) {
       mode: "setup",
       currency: "gbp",
       customer: customerId,
-      payment_method_types: ["card"],
+    
       client_reference_id: registration.id,
       metadata: {
         registrationId: registration.id,
