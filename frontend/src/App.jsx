@@ -11,6 +11,7 @@ const initialForm = {
   playerSurname: "",
   playerDob: "",
   playerSex: "",
+  paymentPlan: "",
 
   emergencyContact1: {
     name: "",
@@ -134,7 +135,7 @@ if (!res.ok) {
   return;
 }
 setValidationError("");
-setStatus("Consent form submitted successfully.");
+setStatus("Registration saved successfully. Payment setup is not yet enabled.");
 setForm(initialForm);
 } catch (err) {
   console.error(err);
@@ -149,7 +150,7 @@ setForm(initialForm);
       <section className="card">
         <img src="/wwfc-letter-head.png" alt="Wroughton & Wichelstowe Football Club" className="logo" />
 
-        <h1>Player Digital Consent Form</h1>
+        <h1>Player Membership Registration</h1>
         <p className="intro">
           Please complete this form for Wroughton & Wichelstowe Football Club.
         </p>
@@ -247,6 +248,31 @@ setForm(initialForm);
 
           <ContactSection title="Emergency Contact 1" data={form.emergencyContact1} onChange={(field, value) => updateContact("emergencyContact1", field, value)} />
           <ContactSection title="Emergency Contact 2" data={form.emergencyContact2} onChange={(field, value) => updateContact("emergencyContact2", field, value)} />
+
+<h2>Membership Payment Plan</h2>
+
+<label>
+  Payment Plan
+  <select
+    required
+    value={form.paymentPlan}
+    onChange={(e) => updateField("paymentPlan", e.target.value)}
+  >
+    <option value="">Select a payment plan</option>
+    <option value="MATCHES_AND_TRAINING">
+      Matches &amp; Training — £21 per month
+    </option>
+    <option value="TRAINING_ONLY">
+      Training only — £11 per month
+    </option>
+  </select>
+</label>
+
+<p className="intro">
+  Monthly payments start on the 1st of the month following registration,
+  then continue on the 1st of each month. There is no charge for the
+  month you register.
+</p>
 
           <h2>Medical Information</h2>
 
@@ -348,7 +374,7 @@ setForm(initialForm);
   </span>
 </label>
         <button type="submit" disabled={!form.acceptedPrivacyPolicy}>
-  Submit Consent Form
+  Submit Registration
 </button>
 
           {status && <p className="status">{status}</p>}

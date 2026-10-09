@@ -102,6 +102,21 @@ consentWalkHome: z.boolean().nullable().optional(),
 ),
 });
 
+const { DateTime } = require("luxon");
+
+const paymentPlans = {
+  MATCHES_AND_TRAINING: 2100,
+  TRAINING_ONLY: 1100,
+};
+
+function getFirstPaymentDate() {
+  return DateTime.now()
+    .setZone("Europe/London")
+    .startOf("month")
+    .plus({ months: 1 })
+    .toJSDate();
+}
+
 // Create new consent form
 router.post("/", async (req, res) => {
   try {
@@ -125,6 +140,11 @@ router.post("/", async (req, res) => {
         playerDob: data.playerDob,
         playerSex: data.playerSex,
 
+        paymentPlan: z.enum([
+        "MATCHES_AND_TRAINING",
+        "TRAINING_ONLY",
+        ]),
+
         emergencyContact1: data.emergencyContact1,
         emergencyContact2: data.emergencyContact2,
 
@@ -145,6 +165,9 @@ router.post("/", async (req, res) => {
         parentSignature: data.parentSignature,
         parentName: data.parentName,
         signatureDate: data.signatureDate,
+        paymentPlan: data.paymentPlan,
+monthlyAmountPence: paymentPlans[data.paymentPlan],
+firstPaymentDate: getFirstPaymentDate(),
       },
     });
 
@@ -165,22 +188,6 @@ router.post("/", async (req, res) => {
   }
 });
 
-router.get("/", async (req, res) => {
-  try {
-    const { ageGroup, playerSex } = req.query;
 
-    const forms = await prisma.consentForm.findMany({
-      where: {
-        ageGroup: ageGroup || undefined,
-        playerSex: playerSex || undefined,
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    res.json(forms);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch forms" });
-  }
-});
 
 module.exports = router;
