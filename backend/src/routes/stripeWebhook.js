@@ -2,7 +2,9 @@ const express = require("express");
 const { DateTime } = require("luxon");
 const prisma = require("../prisma");
 const { getStripe } = require("../services/stripeService");
-
+const {
+  syncMembershipInvoice,
+} = require("../services/invoiceService");
 const router = express.Router();
 
 function objectId(value) {
@@ -234,6 +236,19 @@ router.post("/", async (req, res) => {
       case "customer.subscription.updated":
       case "customer.subscription.deleted":
         await syncSubscription(stripe, event.data.object);
+        break;
+              case "invoice.finalized":
+      case "invoice.updated":
+      case "invoice.paid":
+      case "invoice.payment_failed":
+      case "invoice.payment_action_required":
+      case "invoice.voided":
+      case "invoice.marked_uncollectible":
+        await syncMembershipInvoice(
+          stripe,
+          event.data.object.id,
+          event
+        );
         break;
     }
 

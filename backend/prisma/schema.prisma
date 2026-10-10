@@ -38,8 +38,8 @@ model ConsentForm {
   parentSignature String
   parentName      String
   signatureDate   DateTime
-  
-stripeScheduleId String? @unique
+
+  stripeScheduleId String? @unique
 
   // Membership payment plan
   paymentPlan        PaymentPlan?
@@ -53,6 +53,39 @@ stripeScheduleId String? @unique
 
   // Subscription state; separate from successful payment history
   stripeSubscriptionStatus String?
+  invoices                 MembershipInvoice[]
+}
+
+model MembershipInvoice {
+  id             String      @id @default(cuid())
+  registrationId String
+  registration   ConsentForm @relation(fields: [registrationId], references: [id], onDelete: Restrict)
+
+  stripeInvoiceId      String  @unique
+  stripeSubscriptionId String
+  invoiceNumber        String?
+
+  currency             String
+  amountDuePence       Int
+  amountPaidPence      Int
+  amountRemainingPence Int
+
+  // Stripe invoice status: draft, open, paid, void, uncollectible.
+  // A failed payment can leave the invoice open.
+  status               String
+  attemptCount         Int       @default(0)
+  lastPaymentFailedAt  DateTime?
+  nextPaymentAttemptAt DateTime?
+
+  invoiceCreatedAt DateTime
+  paidAt           DateTime?
+  hostedInvoiceUrl String?
+  invoicePdfUrl    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([registrationId, invoiceCreatedAt])
 }
 
 enum PaymentPlan {
