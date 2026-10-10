@@ -1,8 +1,12 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const { createObjectCsvStringifier } = require("csv-writer");
-const prisma = require("../prisma");
 
+const prisma = require("../prisma");
+const { getStripe } = require("../services/stripeService");
+const {
+  syncMembershipInvoice,
+} = require("../services/invoiceService");
 const router = express.Router();
 
 function requireAdmin(req, res, next) {
@@ -114,13 +118,48 @@ router.get("/registrations", requireAdmin, async (req, res) => {
 
 router.delete("/registrations/:id", requireAdmin, async (req, res) => {
   try {
+    const registration = await prisma.consentForm.findUnique({
+      where: { id: req.params.id },
+      select: {
+        stripeScheduleId: true,
+        stripeSubscriptionId: true,
+        _count: { select: { invoices: true } },
+      },
+    });
+
+    if (!registration) {
+      return res.status(404).json({ error: "Registration not found" });
+    }
+
+    if (
+      registration.stripeScheduleId ||
+      registration.stripeSubscriptionId ||
+      registration._count.invoices > 0
+    ) {
+      return res.status(409).json({
+        error:
+          "This registration has billing records and cannot be deleted. " +
+          "Membership cancellation must be handled separately.",
+      });
+    }
+
     await prisma.consentForm.delete({
       where: { id: req.params.id },
     });
 
     res.json({ success: true });
-  } catch (err) {
-    console.error(err);
+  } catch (error) {
+    if (error.code === "P2003") {
+      return res.status(409).json({
+        error: "This registration has invoice history and cannot be deleted",
+      });
+    }
+
+    if (error.code === "P2025") {
+      return res.status(404).json({ error: "Registration not found" });
+    }
+
+    console.error("Failed to delete registration:", error);
     res.status(500).json({ error: "Failed to delete registration" });
   }
 });
@@ -236,5 +275,113 @@ res.attachment(`wwfc-registrations-${today}.csv`);
     res.status(500).json({ error: "Failed to export CSV" });
   }
 });
+// Read the invoice history saved in our database.
+router.get("/registrations/:id/invoices", requireAdmin, async (req, res) => {
+  try {
+    const registration = await prisma.consentForm.findUnique({
+      where: { id: req.params.id },
+      select: { id: true },
+    });
 
+    if (!registration) {
+      return res.status(404).json({ error: "Registration not found" });
+    }
+
+    const invoices = await prisma.membershipInvoice.findMany({
+      where: { registrationId: registration.id },
+      orderBy: [
+        { invoiceCreatedAt: "desc" },
+        { stripeInvoiceId: "desc" },
+      ],
+    });
+
+    res.json({ invoices });
+  } catch (error) {
+    console.error("Failed to load invoices:", error);
+    res.status(500).json({ error: "Failed to load invoice history" });
+  }
+});
+
+// Import or refresh one page of this registration's Stripe invoices.
+router.post(
+  "/registrations/:id/invoices/sync",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const cursor = req.body?.startingAfter;
+
+      if (
+        cursor !== undefined &&
+        (typeof cursor !== "string" ||
+          !/^in_[A-Za-z0-9]{1,200}$/.test(cursor))
+      ) {
+        return res.status(400).json({ error: "Invalid invoice cursor" });
+      }
+
+      const registration = await prisma.consentForm.findUnique({
+        where: { id: req.params.id },
+      });
+
+      if (!registration) {
+        return res.status(404).json({ error: "Registration not found" });
+      }
+
+      if (
+        !registration.stripeCustomerId ||
+        !registration.stripeSubscriptionId
+      ) {
+        return res.status(409).json({
+          error: "This registration does not yet have a Stripe subscription",
+        });
+      }
+
+      const stripe = getStripe();
+      const subscription = await stripe.subscriptions.retrieve(
+        registration.stripeSubscriptionId
+      );
+
+      const customerId =
+        typeof subscription.customer === "string"
+          ? subscription.customer
+          : subscription.customer?.id;
+
+      if (
+        subscription.livemode ||
+        customerId !== registration.stripeCustomerId ||
+        subscription.metadata?.registrationId !== registration.id
+      ) {
+        return res.status(409).json({
+          error: "Stripe subscription does not match this registration",
+        });
+      }
+
+      const page = await stripe.invoices.list({
+        customer: registration.stripeCustomerId,
+        subscription: registration.stripeSubscriptionId,
+        limit: 10,
+        ...(cursor ? { starting_after: cursor } : {}),
+      });
+
+      let syncedCount = 0;
+
+      for (const invoice of page.data) {
+        const saved = await syncMembershipInvoice(stripe, invoice.id);
+        if (saved) syncedCount++;
+      }
+
+      res.json({
+        syncedCount,
+        hasMore: page.has_more,
+        nextCursor: page.has_more
+          ? page.data[page.data.length - 1]?.id
+          : null,
+      });
+    } catch (error) {
+      console.error("Failed to sync invoices:", error);
+      res.status(500).json({
+        error: "Invoice sync failed. Please try again.",
+      });
+    }
+  }
+);
 module.exports = router;
