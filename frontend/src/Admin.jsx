@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import "./Admin.css";
 
 const API_URL = import.meta.env.VITE_API_URL;
@@ -11,6 +11,12 @@ export default function Admin() {
   const [stats, setStats] = useState(null);
   const [registrations, setRegistrations] = useState([]);
   const [selectedRegistration, setSelectedRegistration] = useState(null);
+  const handleSessionExpired = useCallback(() => {
+  setIsAuthenticated(false);
+  setSelectedRegistration(null);
+  setStats(null);
+  setRegistrations([]);
+}, []);
   const [filters, setFilters] = useState({
   ageGroup: "",
   playerSex: "",
@@ -27,6 +33,7 @@ export default function Admin() {
   setStats(null);
   setRegistrations([]);
   setPassword("");
+  setSelectedRegistration(null);
 }
 
 
@@ -162,17 +169,34 @@ async function loadRegistrations() {
   }
 }
   async function deleteRegistration(id) {
-    const ok = window.confirm("Delete this registration?");
-    if (!ok) return;
+  if (!window.confirm("Delete this registration?")) return;
 
-    await fetch(`${API_URL}/api/admin/registrations/${id}`, {
-  method: "DELETE",
-  credentials: "include",
-});
+  try {
+    const response = await fetch(
+      `${API_URL}/api/admin/registrations/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        credentials: "include",
+      }
+    );
 
-    loadDashboard();
-    loadRegistrations();
+    if (response.status === 401) {
+      handleSessionExpired();
+      return;
+    }
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to delete registration");
+    }
+
+    setSelectedRegistration(null);
+    await Promise.all([loadDashboard(), loadRegistrations()]);
+  } catch (error) {
+    alert(error.message);
   }
+}
 
   async function downloadCsv() {
   try {
@@ -523,7 +547,11 @@ if (!isAuthenticated) {
   }
 />
             </ModalSection>
-
+<PaymentHistory
+  key={selectedRegistration.id}
+  registration={selectedRegistration}
+  onSessionExpired={handleSessionExpired}
+/>
             <ModalSection title="Signature">
               <Detail label="Signed By" value={selectedRegistration.parentName} />
               <Detail label="Signature Date" value={new Date(selectedRegistration.signatureDate).toLocaleDateString("en-GB")} />
@@ -564,6 +592,264 @@ function ModalSection({ title, children }) {
     <section className="modal-section">
       <h3>{title}</h3>
       <div className="modal-grid">{children}</div>
+    </section>
+  );
+}
+
+function PaymentHistory({ registration, onSessionExpired }) {
+  const [invoices, setInvoices] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const endpoint =
+    `${API_URL}/api/admin/registrations/` +
+    `${encodeURIComponent(registration.id)}/invoices`;
+
+  async function request(url, options = {}) {
+    const response = await fetch(url, {
+      ...options,
+      credentials: "include",
+    });
+
+    if (response.status === 401) {
+      onSessionExpired();
+      throw new Error("Your session expired. Please log in again.");
+    }
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || "Unable to load payment history");
+    }
+
+    return data;
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const response = await fetch(endpoint, {
+          credentials: "include",
+        });
+
+        if (cancelled) return;
+
+        if (response.status === 401) {
+          onSessionExpired();
+          return;
+        }
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Unable to load payment history");
+        }
+
+        if (!Array.isArray(data.invoices)) {
+          throw new Error("Invalid invoice response");
+        }
+
+        if (!cancelled) setInvoices(data.invoices);
+      } catch (err) {
+        if (!cancelled) setError(err.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [endpoint, onSessionExpired]);
+
+  async function syncInvoices() {
+    setSyncing(true);
+    setError("");
+    setMessage("");
+
+    try {
+      let startingAfter;
+      let total = 0;
+
+      do {
+        const page = await request(`${endpoint}/sync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            startingAfter ? { startingAfter } : {}
+          ),
+        });
+
+        total += page.syncedCount;
+
+        if (
+          page.hasMore &&
+          (!page.nextCursor || page.nextCursor === startingAfter)
+        ) {
+          throw new Error("Invoice sync returned an invalid page");
+        }
+
+        startingAfter = page.hasMore ? page.nextCursor : undefined;
+      } while (startingAfter);
+
+      const data = await request(endpoint);
+
+      if (!Array.isArray(data.invoices)) {
+        throw new Error("Invalid invoice response");
+      }
+
+      setInvoices(data.invoices);
+      setMessage(`Updated ${total} invoice${total === 1 ? "" : "s"}.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  const money = (pence, currency) =>
+    new Intl.NumberFormat("en-GB", {
+      style: "currency",
+      currency: currency.toUpperCase(),
+    }).format(pence / 100);
+
+  const date = (value) =>
+    value
+      ? new Date(value).toLocaleDateString("en-GB", {
+          timeZone: "Europe/London",
+        })
+      : "—";
+
+  const planLabel = {
+    MATCHES_AND_TRAINING: "Matches & Training",
+    TRAINING_ONLY: "Training only",
+  }[registration.paymentPlan] || "Not selected";
+
+  return (
+    <section className="modal-section">
+      <h3>Membership and payments</h3>
+
+      <div className="modal-grid">
+        <Detail label="Payment plan" value={planLabel} />
+        <Detail
+          label="Monthly amount"
+          value={
+            registration.monthlyAmountPence == null
+              ? "—"
+              : money(registration.monthlyAmountPence, "gbp")
+          }
+        />
+        <Detail
+          label="First payment date"
+          value={date(registration.firstPaymentDate)}
+        />
+        <Detail
+          label="Subscription status"
+          value={registration.stripeSubscriptionStatus || "Not set up"}
+        />
+      </div>
+
+      <button
+        type="button"
+        className="download-btn"
+        onClick={syncInvoices}
+        disabled={
+          loading || syncing || !registration.stripeSubscriptionId
+        }
+      >
+        {syncing ? "Syncing…" : "Sync invoices"}
+      </button>
+
+      {error && <p className="error" role="alert">{error}</p>}
+      {message && <p role="status">{message}</p>}
+
+      {loading ? (
+        <p>Loading payment history…</p>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Invoice</th>
+                <th>Amount due</th>
+                <th>Amount paid</th>
+                <th>Status</th>
+                <th>Payment attempts</th>
+                <th>Last failed attempt</th>
+                <th>Next retry</th>
+                <th>Invoice links</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoices.map((invoice) => (
+                <tr key={invoice.stripeInvoiceId}>
+                  <td>{date(invoice.invoiceCreatedAt)}</td>
+                  <td>{invoice.invoiceNumber || "Draft"}</td>
+                  <td>
+                    {money(invoice.amountDuePence, invoice.currency)}
+                  </td>
+                  <td>
+                    {money(invoice.amountPaidPence, invoice.currency)}
+                  </td>
+                  <td>
+                    {invoice.status === "open" &&
+                    invoice.lastPaymentFailedAt
+                      ? "Open — payment failed"
+                      : invoice.status}
+                  </td>
+                  <td>{invoice.attemptCount}</td>
+                  <td>{date(invoice.lastPaymentFailedAt)}</td>
+                  <td>
+                    {invoice.status === "open"
+                      ? date(invoice.nextPaymentAttemptAt)
+                      : "—"}
+                  </td>
+                  <td>
+                    {invoice.hostedInvoiceUrl && (
+                      <a
+                        href={invoice.hostedInvoiceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        View invoice
+                      </a>
+                    )}
+                    {invoice.invoicePdfUrl && (
+                      <>
+                        {" "}
+                        <a
+                          href={invoice.invoicePdfUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          PDF
+                        </a>
+                      </>
+                    )}
+                    {!invoice.hostedInvoiceUrl &&
+                      !invoice.invoicePdfUrl && "—"}
+                  </td>
+                </tr>
+              ))}
+
+              {invoices.length === 0 && (
+                <tr>
+                  <td colSpan="9">
+                    No invoices saved yet. Use Sync invoices to check Stripe.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }
