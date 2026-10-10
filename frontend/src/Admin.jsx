@@ -11,6 +11,21 @@ export default function Admin() {
   const [stats, setStats] = useState(null);
   const [registrations, setRegistrations] = useState([]);
   const [selectedRegistration, setSelectedRegistration] = useState(null);
+  const handleBillingChanged = useCallback((updatedRegistration) => {
+  setRegistrations((current) =>
+    current.map((registration) =>
+      registration.id === updatedRegistration.id
+        ? updatedRegistration
+        : registration
+    )
+  );
+
+  setSelectedRegistration((current) =>
+    current?.id === updatedRegistration.id
+      ? updatedRegistration
+      : current
+  );
+}, []);
   const handleSessionExpired = useCallback(() => {
   setIsAuthenticated(false);
   setSelectedRegistration(null);
@@ -551,6 +566,7 @@ if (!isAuthenticated) {
   key={selectedRegistration.id}
   registration={selectedRegistration}
   onSessionExpired={handleSessionExpired}
+  onBillingChanged={handleBillingChanged}
 />
             <ModalSection title="Signature">
               <Detail label="Signed By" value={selectedRegistration.parentName} />
@@ -596,13 +612,13 @@ function ModalSection({ title, children }) {
   );
 }
 
-function PaymentHistory({ registration, onSessionExpired }) {
+function PaymentHistory({ registration, onSessionExpired, onBillingChanged, }) {
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-
+const [cancelling, setCancelling] = useState(false);
   const endpoint =
     `${API_URL}/api/admin/registrations/` +
     `${encodeURIComponent(registration.id)}/invoices`;
@@ -667,6 +683,45 @@ function PaymentHistory({ registration, onSessionExpired }) {
       cancelled = true;
     };
   }, [endpoint, onSessionExpired]);
+
+  async function cancelBilling() {
+  const playerName =
+    `${registration.playerFirstName} ${registration.playerSurname}`;
+
+  if (
+    !window.confirm(
+      `Cancel membership payments immediately for ${playerName}?\n\n` +
+      "Future monthly billing will stop. No refund will be issued.\n" +
+      "Existing unpaid invoices are not written off.\n" +
+      "The registration and invoice history will remain."
+    )
+  ) {
+    return;
+  }
+
+  setCancelling(true);
+  setError("");
+  setMessage("");
+
+  try {
+    const data = await request(
+      `${API_URL}/api/admin/registrations/` +
+        `${encodeURIComponent(registration.id)}/billing/cancel`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      }
+    );
+
+    onBillingChanged(data.registration);
+    setMessage(data.message);
+  } catch (err) {
+    setError(err.message);
+  } finally {
+    setCancelling(false);
+  }
+}
 
   async function syncInvoices() {
     setSyncing(true);
@@ -759,13 +814,27 @@ function PaymentHistory({ registration, onSessionExpired }) {
         type="button"
         className="download-btn"
         onClick={syncInvoices}
-        disabled={
-          loading || syncing || !registration.stripeSubscriptionId
-        }
+     disabled={
+  loading || syncing || cancelling || !registration.stripeSubscriptionId
+}
       >
         {syncing ? "Syncing…" : "Sync invoices"}
       </button>
-
+{(registration.stripeScheduleId ||
+  registration.stripeSubscriptionId) &&
+  !["canceled", "incomplete_expired"].includes(
+    registration.stripeSubscriptionStatus
+  ) && (
+    <button
+      type="button"
+      className="delete-btn"
+      onClick={cancelBilling}
+      disabled={loading || syncing || cancelling}
+      style={{ marginLeft: "12px" }}
+    >
+      {cancelling ? "Cancelling…" : "Cancel membership payments"}
+    </button>
+  )}
       {error && <p className="error" role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
 

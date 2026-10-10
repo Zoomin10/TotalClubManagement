@@ -384,4 +384,159 @@ router.post(
     }
   }
 );
+
+router.post(
+  "/registrations/:id/billing/cancel",
+  requireAdmin,
+  async (req, res) => {
+    // Protect this cookie-authenticated action against cross-site requests.
+    const frontendUrl = process.env.FRONTEND_URL;
+
+    if (
+      !frontendUrl ||
+      req.get("origin") !== new URL(frontendUrl).origin
+    ) {
+      return res.status(403).json({ error: "Invalid request origin" });
+    }
+
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({
+        error: "Cancellation confirmation is required",
+      });
+    }
+
+    try {
+      const registration = await prisma.consentForm.findUnique({
+        where: { id: req.params.id },
+      });
+
+      if (!registration) {
+        return res.status(404).json({ error: "Registration not found" });
+      }
+
+      if (
+        !registration.stripeCustomerId ||
+        (!registration.stripeScheduleId &&
+          !registration.stripeSubscriptionId)
+      ) {
+        return res.status(409).json({
+          error: "This registration has no scheduled or active billing",
+        });
+      }
+
+      const stripe = getStripe();
+      const objectId = (value) =>
+        typeof value === "string" ? value : value?.id;
+
+      function verifyOwnership(object) {
+        if (
+          object.livemode ||
+          objectId(object.customer) !== registration.stripeCustomerId ||
+          object.metadata?.registrationId !== registration.id
+        ) {
+          const error = new Error(
+            "Stripe billing does not match this registration"
+          );
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+
+      let schedule = null;
+
+      if (registration.stripeScheduleId) {
+        schedule = await stripe.subscriptionSchedules.retrieve(
+          registration.stripeScheduleId
+        );
+        verifyOwnership(schedule);
+      }
+
+      const linkedSubscriptionId =
+        objectId(schedule?.subscription) ||
+        objectId(schedule?.released_subscription);
+
+      if (
+        linkedSubscriptionId &&
+        registration.stripeSubscriptionId &&
+        linkedSubscriptionId !== registration.stripeSubscriptionId
+      ) {
+        return res.status(409).json({
+          error: "Stripe schedule and subscription do not match",
+        });
+      }
+
+      const subscriptionId =
+        registration.stripeSubscriptionId || linkedSubscriptionId;
+
+      let subscription = null;
+
+      if (subscriptionId) {
+        subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        verifyOwnership(subscription);
+      }
+
+      if (
+        schedule &&
+        ["not_started", "active"].includes(schedule.status)
+      ) {
+        await stripe.subscriptionSchedules.cancel(schedule.id, {
+          invoice_now: false,
+          prorate: false,
+        });
+      } else if (
+        subscription &&
+        !["canceled", "incomplete_expired"].includes(subscription.status)
+      ) {
+        await stripe.subscriptions.cancel(subscription.id, {
+          invoice_now: false,
+          prorate: false,
+        });
+      } else if (!subscription && schedule?.status !== "canceled") {
+        return res.status(409).json({
+          error: "No cancellable subscription was found",
+        });
+      }
+
+      // Check Stripe again before updating our database.
+      let status = "canceled";
+
+      if (subscriptionId) {
+        subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        verifyOwnership(subscription);
+        status = subscription.status;
+
+        if (!["canceled", "incomplete_expired"].includes(status)) {
+          throw new Error("Stripe cancellation has not completed");
+        }
+      }
+
+      const updated = await prisma.consentForm.update({
+        where: { id: registration.id },
+        data: {
+          stripeSubscriptionStatus: status,
+          ...(subscriptionId
+            ? { stripeSubscriptionId: subscriptionId }
+            : {}),
+        },
+      });
+
+      return res.json({
+        registration: updated,
+        message:
+          "Membership payments cancelled. Registration and invoices retained.",
+      });
+    } catch (error) {
+      console.error("Billing cancellation failed:", error);
+
+      return res.status(error.statusCode || 500).json({
+        error:
+          error.statusCode === 409
+            ? error.message
+            : "Cancellation could not be confirmed. Please retry; " +
+              "the same billing record will be checked again.",
+      });
+    }
+  }
+);
+
 module.exports = router;
