@@ -118,49 +118,180 @@ router.get("/registrations", requireAdmin, async (req, res) => {
 
 router.delete("/registrations/:id", requireAdmin, async (req, res) => {
   try {
-    const registration = await prisma.consentForm.findUnique({
-      where: { id: req.params.id },
-      select: {
-        stripeScheduleId: true,
-        stripeSubscriptionId: true,
-        _count: { select: { invoices: true } },
-      },
-    });
-
-    if (!registration) {
-      return res.status(404).json({ error: "Registration not found" });
-    }
+    const frontendUrl = process.env.FRONTEND_URL;
 
     if (
-      registration.stripeScheduleId ||
-      registration.stripeSubscriptionId ||
-      registration._count.invoices > 0
+      !frontendUrl ||
+      req.get("origin") !== new URL(frontendUrl).origin
     ) {
-      return res.status(409).json({
-        error:
-          "This registration has billing records and cannot be deleted. " +
-          "Membership cancellation must be handled separately.",
+      return res.status(403).json({ error: "Invalid request origin" });
+    }
+
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({
+        error: "Deletion confirmation is required",
       });
     }
 
-    await prisma.consentForm.delete({
+    const registration = await prisma.consentForm.findUnique({
       where: { id: req.params.id },
+    });
+
+    if (!registration) {
+      return res.status(404).json({ error: "Member not found" });
+    }
+
+    // getStripe() requires a test secret key for this pilot.
+    const stripe = getStripe();
+    const objectId = (value) =>
+      typeof value === "string" ? value : value?.id;
+
+    function verifyOwnership(object) {
+      if (
+        object.livemode ||
+        objectId(object.customer) !== registration.stripeCustomerId ||
+        object.metadata?.registrationId !== registration.id
+      ) {
+        const error = new Error(
+          "Stripe billing does not match this member"
+        );
+        error.statusCode = 409;
+        throw error;
+      }
+    }
+
+    let schedule = null;
+
+    if (registration.stripeScheduleId) {
+      schedule = await stripe.subscriptionSchedules.retrieve(
+        registration.stripeScheduleId
+      );
+
+      verifyOwnership(schedule);
+
+      if (["not_started", "active"].includes(schedule.status)) {
+        return res.status(409).json({
+          error: "Cancel membership payments before deleting this member",
+        });
+      }
+    }
+
+    const linkedSubscriptionId =
+      objectId(schedule?.subscription) ||
+      objectId(schedule?.released_subscription);
+
+    if (
+      linkedSubscriptionId &&
+      registration.stripeSubscriptionId &&
+      linkedSubscriptionId !== registration.stripeSubscriptionId
+    ) {
+      return res.status(409).json({
+        error: "Stripe schedule and subscription do not match",
+      });
+    }
+
+    const subscriptionId =
+      registration.stripeSubscriptionId || linkedSubscriptionId;
+
+    if (subscriptionId) {
+      const subscription = await stripe.subscriptions.retrieve(
+        subscriptionId
+      );
+
+      verifyOwnership(subscription);
+
+      if (
+        !["canceled", "incomplete_expired"].includes(subscription.status)
+      ) {
+        return res.status(409).json({
+          error: "Cancel membership payments before deleting this member",
+        });
+      }
+    } else if (schedule && schedule.status !== "canceled") {
+      return res.status(409).json({
+        error: "Stripe billing must be reviewed before deletion",
+      });
+    }
+
+    // Prevent an abandoned Checkout link being completed after deletion.
+    if (registration.stripeCheckoutSessionId) {
+      let session = await stripe.checkout.sessions.retrieve(
+        registration.stripeCheckoutSessionId
+      );
+
+      verifyOwnership(session);
+
+      if (session.status === "open") {
+        await stripe.checkout.sessions.expire(session.id);
+        session = await stripe.checkout.sessions.retrieve(session.id);
+      }
+
+      if (session.status === "open") {
+        return res.status(409).json({
+          error: "Payment setup is still open. Please retry deletion.",
+        });
+      }
+
+      // A completed Checkout may still be awaiting its setup webhook.
+      if (
+        session.status === "complete" &&
+        !registration.stripeScheduleId
+      ) {
+        return res.status(409).json({
+          error:
+            "Payment setup completed but no schedule is recorded. " +
+            "Resolve setup and cancel its billing before deletion.",
+        });
+      }
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Avoid deleting if a webhook changed the billing references
+      // while we were checking Stripe.
+      const current = await tx.consentForm.findUnique({
+        where: { id: registration.id },
+      });
+
+      if (!current) {
+        const error = new Error("Member not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      for (const field of [
+        "stripeCustomerId",
+        "stripeScheduleId",
+        "stripeSubscriptionId",
+        "stripeCheckoutSessionId",
+      ]) {
+        if (current[field] !== registration[field]) {
+          const error = new Error(
+            "Billing details changed. Refresh the member and try again."
+          );
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+
+      await tx.membershipInvoice.deleteMany({
+        where: { registrationId: registration.id },
+      });
+
+      await tx.consentForm.delete({
+        where: { id: registration.id },
+      });
     });
 
     res.json({ success: true });
   } catch (error) {
-    if (error.code === "P2003") {
-      return res.status(409).json({
-        error: "This registration has invoice history and cannot be deleted",
-      });
-    }
+    console.error("Failed to delete test member:", error);
 
-    if (error.code === "P2025") {
-      return res.status(404).json({ error: "Registration not found" });
-    }
-
-    console.error("Failed to delete registration:", error);
-    res.status(500).json({ error: "Failed to delete registration" });
+    res.status(error.statusCode || 500).json({
+      error:
+        error.statusCode
+          ? error.message
+          : "Deletion could not be completed. Refresh and try again.",
+    });
   }
 });
 

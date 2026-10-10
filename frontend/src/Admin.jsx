@@ -117,11 +117,34 @@ export default function Admin() {
       document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) { setError(err.message); } finally { setExporting(false); }
   }
-  async function deleteMember(member) {
-    if (!window.confirm(`Delete the registration for ${name(member)}?`)) return;
-    try { await request(`/registrations/${encodeURIComponent(member.id)}`, { method: "DELETE" }); setSelected(null); await refreshMembers(); }
-    catch (err) { setError(err.message); }
+async function deleteMember(member) {
+  if (
+    !window.confirm(
+      `Permanently delete test member ${name(member)}?\n\n` +
+      "Their registration, consent details and saved invoices " +
+      "will be deleted from this app.\n\n" +
+      "Stripe records will remain. This cannot be undone."
+    )
+  ) {
+    return;
   }
+
+  try {
+    await request(
+      `/registrations/${encodeURIComponent(member.id)}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      }
+    );
+
+    setSelected(null);
+    await refreshMembers();
+  } catch (err) {
+    setError(err.message);
+  }
+}
   const teams = [...new Set(members.map((member) => member.wwfcTeam).filter(Boolean))].sort();
   const unpaidCount = members.filter((member) => member.invoiceSummary?.openInvoiceCount > 0).length;
   const counts = { all: members.length, active: members.filter((m) => billing(m).key === "active").length, setup: members.filter((m) => billing(m).key === "setup").length, cancelled: members.filter((m) => billing(m).key === "cancelled").length, unpaid: unpaidCount };
@@ -196,7 +219,26 @@ function MemberPanel({ registration, onClose, onSessionExpired, onBillingChanged
     <div className="member-tabs profile-tabs">{[["payments", "Payments"], ["details", "Member details"], ["consent", "Consent & medical"]].map(([key, label]) => <button key={key} aria-pressed={tab === key} className={tab === key ? "is-active" : ""} onClick={() => setTab(key)}>{label}</button>)}</div>
     <div hidden={tab !== "payments"}><PaymentHistory registration={registration} onSessionExpired={onSessionExpired} onBillingChanged={onBillingChanged} onInvoicesSynced={onInvoicesSynced} /></div>
     {tab === "details" && <><ModalSection title="Player details"><Detail label="Team" value={registration.wwfcTeam} /><Detail label="Age group" value={String(registration.ageGroup).toUpperCase()} /><Detail label="Gender" value={registration.playerSex} /><Detail label="Date of birth" value={date(registration.playerDob)} /><Detail label="Registered" value={date(registration.createdAt)} /><Detail label="Registration reference" value={registration.id} /><Detail label="Email" value={registration.email} /><Detail label="Postcode" value={registration.postcode} /><Detail label="House number" value={registration.houseNumber} /></ModalSection>{[registration.emergencyContact1, registration.emergencyContact2].map((contact, index) => <ModalSection key={index} title={`Parent / emergency contact ${index + 1}`}><Detail label="Name" value={contact?.name} /><Detail label="Relationship" value={contact?.relationship} /><Detail label="Phone" value={contact?.phoneNumber} /><Detail label="Email" value={contact?.email} /><Detail label="Date of birth" value={date(contact?.dob)} /><Detail label="Postcode" value={contact?.postcode} /><Detail label="House number" value={contact?.houseNumber} /></ModalSection>)}
-    {!registration.stripeScheduleId && !registration.stripeSubscriptionId && <div className="member-danger-zone"><p>Remove a registration with no billing records. The backend also checks for invoice history.</p><button className="delete-btn" onClick={onDelete}>Delete registration</button></div>}</>}
+        {(
+      (!registration.stripeScheduleId &&
+        !registration.stripeSubscriptionId) ||
+      ["canceled", "incomplete_expired"].includes(
+        registration.stripeSubscriptionStatus
+      )
+    ) && (
+      <div className="member-danger-zone">
+        <p>
+          Permanently remove this test member and their saved invoices
+          from the app. Stripe records will remain.
+        </p>
+
+        <button className="delete-btn" onClick={onDelete}>
+          Delete test member
+        </button>
+      </div>
+    )}
+  </>
+)}
     {tab === "consent" && <><ModalSection title="Medical information"><Detail label="Medical information" value={registration.medicalInfo} wide /><Detail label="Allergies" value={registration.allergies} wide /></ModalSection><ModalSection title="Permissions"><Detail label="Contact consent" value={registration.consentData ? "Yes" : "No"} /><Detail label="Photo consent" value={registration.consentPhotos ? "Yes" : "No"} /><Detail label="Video consent" value={registration.consentVideos ? "Yes" : "No"} /><Detail label="Walk home alone" value={registration.consentWalkHome == null ? "Not applicable" : registration.consentWalkHome ? "Yes" : "No"} />{registration.acceptedPrivacyPolicy != null && <Detail label="Privacy policy accepted" value={registration.acceptedPrivacyPolicy ? "Yes" : "No"} />}</ModalSection><ModalSection title="Signature"><Detail label="Signed by" value={registration.parentName} /><Detail label="Signature" value={registration.parentSignature} /><Detail label="Signature date" value={date(registration.signatureDate)} /></ModalSection></>}
   </div></div>;
 }
