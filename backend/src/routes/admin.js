@@ -538,5 +538,51 @@ router.post(
     }
   }
 );
+router.get("/members", requireAdmin, async (req, res) => {
+  try {
+    const registrations = await prisma.consentForm.findMany({
+      orderBy: { createdAt: "desc" },
+      include: {
+        invoices: {
+          where: { status: "open" },
+          select: {
+            currency: true,
+            amountRemainingPence: true,
+          },
+        },
+      },
+    });
+
+    const members = registrations.map(
+      ({ invoices, ...registration }) => {
+        const gbpInvoices = invoices.filter(
+          (invoice) => invoice.currency === "gbp"
+        );
+
+        return {
+          ...registration,
+          invoiceSummary: {
+            outstandingPence: gbpInvoices.reduce(
+              (total, invoice) =>
+                total + invoice.amountRemainingPence,
+              0
+            ),
+            openInvoiceCount: gbpInvoices.filter(
+              (invoice) => invoice.amountRemainingPence > 0
+            ).length,
+          },
+        };
+      }
+    );
+
+    res.json({ members });
+  } catch (error) {
+    console.error("Failed to load members:", error);
+
+    res.status(500).json({
+      error: "Failed to load member directory",
+    });
+  }
+});
 
 module.exports = router;
