@@ -238,7 +238,7 @@ function MemberPanel({ registration, onClose, onSessionExpired, onBillingChanged
       </div>
     )}
   </>
-)}
+}
     {tab === "consent" && <><ModalSection title="Medical information"><Detail label="Medical information" value={registration.medicalInfo} wide /><Detail label="Allergies" value={registration.allergies} wide /></ModalSection><ModalSection title="Permissions"><Detail label="Contact consent" value={registration.consentData ? "Yes" : "No"} /><Detail label="Photo consent" value={registration.consentPhotos ? "Yes" : "No"} /><Detail label="Video consent" value={registration.consentVideos ? "Yes" : "No"} /><Detail label="Walk home alone" value={registration.consentWalkHome == null ? "Not applicable" : registration.consentWalkHome ? "Yes" : "No"} />{registration.acceptedPrivacyPolicy != null && <Detail label="Privacy policy accepted" value={registration.acceptedPrivacyPolicy ? "Yes" : "No"} />}</ModalSection><ModalSection title="Signature"><Detail label="Signed by" value={registration.parentName} /><Detail label="Signature" value={registration.parentSignature} /><Detail label="Signature date" value={date(registration.signatureDate)} /></ModalSection></>}
   </div></div>;
 }
