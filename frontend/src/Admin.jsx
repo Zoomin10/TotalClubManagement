@@ -260,6 +260,8 @@ function ModalSection({ title, children }) {
   );
 }
 function PaymentHistory({ registration, onSessionExpired, onBillingChanged, onInvoicesSynced }) {
+  const [settingUp, setSettingUp] = useState(false);
+  const [checkoutUrl, setCheckoutUrl] = useState("");
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -315,6 +317,29 @@ const [cancelling, setCancelling] = useState(false);
       cancelled = true;
     };
   }, [endpoint, onSessionExpired]);
+  async function resumePaymentSetup() {
+    setSettingUp(true); setError(""); setMessage(""); setCheckoutUrl("");
+    try {
+      const data = await request(
+        `${API_URL}/api/admin` + `/registrations/${encodeURIComponent(registration.id)}/payment-setup`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }
+      );
+      const url = new URL(data.checkoutUrl);
+      if (url.protocol !== "https:" || url.hostname !== "checkout.stripe.com") {
+        throw new Error("Stripe returned an invalid setup link");
+      }
+      if (data.registration) onBillingChanged(data.registration);
+      setCheckoutUrl(url.href);
+      setMessage("Setup link ready. The member must complete card setup using this link.");
+    } catch (err) { setError(err.message); }
+    finally { setSettingUp(false); }
+  }
+
+  async function copySetupLink() {
+    try { await navigator.clipboard.writeText(checkoutUrl); setMessage("Setup link copied. Share it securely with this member."); }
+    catch { setError("Could not copy the link. Right-click Open secure setup and copy its link address."); }
+  }
+
   async function cancelBilling() {
   const playerName =
     `${registration.playerFirstName} ${registration.playerSurname}`;
@@ -423,12 +448,27 @@ const [cancelling, setCancelling] = useState(false);
           value={billing(registration).label}
         />
       </div>
+      {!registration.stripeScheduleId && !registration.stripeSubscriptionId &&
+        !registration.stripeSubscriptionStatus && registration.paymentPlan && (
+          <div className="setup-actions">
+            <button type="button" className="download-btn" onClick={resumePaymentSetup}
+              disabled={loading || settingUp || syncing || cancelling}>
+              {settingUp ? "Preparing setup…" : "Resume payment setup"}
+            </button>
+            {checkoutUrl && <div style={{ margin: "12px 0" }}>
+              <a className="secondary-btn" href={checkoutUrl} target="_blank" rel="noopener noreferrer">Open secure setup</a>{" "}
+              <button type="button" className="secondary-btn" onClick={copySetupLink}>Copy setup link</button>
+              <p>This link is for this member's card setup. No payment is collected today.</p>
+            </div>}
+          </div>
+        )}
+
       <button
         type="button"
         className="download-btn"
         onClick={syncInvoices}
      disabled={
-  loading || syncing || cancelling || !registration.stripeSubscriptionId
+  loading || syncing || cancelling || settingUp || !registration.stripeSubscriptionId
 }
       >
         {syncing ? "Syncing…" : "Sync invoices"}
@@ -442,7 +482,7 @@ const [cancelling, setCancelling] = useState(false);
       type="button"
       className="delete-btn"
       onClick={cancelBilling}
-      disabled={loading || syncing || cancelling}
+      disabled={loading || syncing || cancelling || settingUp}
       
     >
       {cancelling ? "Cancelling…" : "Cancel membership payments"}

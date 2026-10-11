@@ -3,7 +3,7 @@ const jwt = require("jsonwebtoken");
 const { createObjectCsvStringifier } = require("csv-writer");
 
 const prisma = require("../prisma");
-const { getStripe } = require("../services/stripeService");
+const { getStripe, createRegistrationCheckout } = require("../services/stripeService");
 const {
   syncMembershipInvoice,
 } = require("../services/invoiceService");
@@ -728,6 +728,26 @@ router.get("/members", requireAdmin, async (req, res) => {
 
     res.status(500).json({
       error: "Failed to load member directory",
+    });
+  }
+});
+
+// Resume card setup for a saved registration without creating another member.
+router.post("/registrations/:id/payment-setup", requireAdmin, async (req, res) => {
+  try {
+    const frontendUrl = process.env.FRONTEND_URL;
+    if (!req.trudashAdmin && (!frontendUrl || req.get("origin") !== new URL(frontendUrl).origin)) {
+      return res.status(403).json({ error: "Invalid request origin" });
+    }
+    const registration = await prisma.consentForm.findUnique({ where: { id: req.params.id } });
+    if (!registration) return res.status(404).json({ error: "Member not found" });
+    const checkoutUrl = await createRegistrationCheckout(registration);
+    const updated = await prisma.consentForm.findUnique({ where: { id: registration.id } });
+    res.json({ checkoutUrl, registration: updated });
+  } catch (error) {
+    console.error("Resume payment setup failed:", error.message);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : "Payment setup could not start. Check the backend Stripe error log, then retry this member.",
     });
   }
 });

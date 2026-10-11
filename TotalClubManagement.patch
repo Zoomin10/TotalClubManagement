@@ -1,107 +1,228 @@
-diff --git a/backend/src/middleware/trudashAdmin.js b/backend/src/middleware/trudashAdmin.js
-new file mode 100644
-index 0000000..0bbba46
---- /dev/null
-+++ b/backend/src/middleware/trudashAdmin.js
-@@ -0,0 +1,33 @@
-+const crypto = require("crypto");
-+const jwt = require("jsonwebtoken");
-+const seen = new Map();
-+
-+// Only server-signed assertions are trusted; browser identity headers are not.
-+function verifyTrudashAdmin(req, res) {
-+  const assertion = req.get("x-trudash-assertion");
-+  if (!assertion) return false;
-+  try {
-+    const secret = process.env.TRUDASH_MEMBERSHIP_SHARED_SECRET;
-+    if (!secret || Buffer.byteLength(secret) < 32) throw new Error("Bridge not configured");
-+    const claims = jwt.verify(assertion, secret, {
-+      algorithms: ["HS256"], issuer: "trudash", audience: "tcm-membership-admin",
-+      maxAge: "30s", clockTolerance: 2,
-+    });
-+    const hash = crypto.createHash("sha256").update(JSON.stringify(req.body || null)).digest("hex");
-+    if (claims.role !== "membership_admin" || typeof claims.sub !== "string" ||
-+        claims.method !== req.method || claims.path !== req.originalUrl || claims.bodyHash !== hash ||
-+        typeof claims.jti !== "string" || !Number.isInteger(claims.exp)) {
-+      throw new Error("Invalid bridge claims");
-+    }
-+    const now = Math.floor(Date.now() / 1000);
-+    for (const [id, expiry] of seen) if (expiry + 2 < now) seen.delete(id);
-+    if (seen.has(claims.jti) || seen.size >= 10000) throw new Error("Invalid or replayed assertion");
-+    seen.set(claims.jti, claims.exp);
-+    req.trudashAdmin = { username: claims.sub };
-+    return true;
-+  } catch {
-+    res.status(401).json({ error: "Invalid or expired TruDash authorization" });
-+    return false;
-+  }
-+}
-+module.exports = { verifyTrudashAdmin };
 diff --git a/backend/src/routes/admin.js b/backend/src/routes/admin.js
-index 79857da..a429180 100644
+index a429180..f1b4647 100644
 --- a/backend/src/routes/admin.js
 +++ b/backend/src/routes/admin.js
-@@ -7,9 +7,17 @@ const { getStripe } = require("../services/stripeService");
+@@ -3,7 +3,7 @@ const jwt = require("jsonwebtoken");
+ const { createObjectCsvStringifier } = require("csv-writer");
+ 
+ const prisma = require("../prisma");
+-const { getStripe } = require("../services/stripeService");
++const { getStripe, createRegistrationCheckout } = require("../services/stripeService");
  const {
    syncMembershipInvoice,
  } = require("../services/invoiceService");
-+const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
- const router = express.Router();
- 
- function requireAdmin(req, res, next) {
-+  if (req.get("x-trudash-assertion")) {
-+    if (verifyTrudashAdmin(req, res)) return next();
-+    return;
-+  }
-+  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
-+    return res.status(401).json({ error: "Sign in through TruDash" });
-+  }
-   const token = req.cookies?.admin_token;
- 
-   if (!token) {
-@@ -17,7 +25,8 @@ function requireAdmin(req, res, next) {
+@@ -732,4 +732,24 @@ router.get("/members", requireAdmin, async (req, res) => {
    }
+ });
  
-   try {
--    jwt.verify(token, process.env.JWT_SECRET);
-+    const claims = jwt.verify(token, process.env.JWT_SECRET);
-+    if (claims.role !== "admin") throw new Error("Admin role required");
-     next();
-   } catch (err) {
-     return res.status(401).json({ error: "Invalid or expired admin session" });
-@@ -25,6 +34,9 @@ function requireAdmin(req, res, next) {
++// Resume card setup for a saved registration without creating another member.
++router.post("/registrations/:id/payment-setup", requireAdmin, async (req, res) => {
++  try {
++    const frontendUrl = process.env.FRONTEND_URL;
++    if (!req.trudashAdmin && (!frontendUrl || req.get("origin") !== new URL(frontendUrl).origin)) {
++      return res.status(403).json({ error: "Invalid request origin" });
++    }
++    const registration = await prisma.consentForm.findUnique({ where: { id: req.params.id } });
++    if (!registration) return res.status(404).json({ error: "Member not found" });
++    const checkoutUrl = await createRegistrationCheckout(registration);
++    const updated = await prisma.consentForm.findUnique({ where: { id: registration.id } });
++    res.json({ checkoutUrl, registration: updated });
++  } catch (error) {
++    console.error("Resume payment setup failed:", error.message);
++    res.status(error.statusCode || 500).json({
++      error: error.statusCode ? error.message : "Payment setup could not start. Check the backend Stripe error log, then retry this member.",
++    });
++  }
++});
++
+ module.exports = router;
+\ No newline at end of file
+diff --git a/backend/src/services/stripeService.js b/backend/src/services/stripeService.js
+index f8484db..d660127 100644
+--- a/backend/src/services/stripeService.js
++++ b/backend/src/services/stripeService.js
+@@ -11,8 +11,37 @@ function getStripe() {
+   return new Stripe(key);
  }
  
- router.post("/login", (req, res) => {
-+  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
-+    return res.status(403).json({ error: "Use Microsoft sign-in through TruDash" });
++function setupConflict(message) {
++  const error = new Error(message);
++  error.statusCode = 409;
++  return error;
++}
++
+ async function createRegistrationCheckout(registration) {
++  // Read fresh references so a retry cannot restart existing/cancelled billing.
++  registration = await prisma.consentForm.findUnique({ where: { id: registration.id } });
++  if (!registration) {
++    const error = new Error("Registration not found");
++    error.statusCode = 404;
++    throw error;
 +  }
-   try {
-     const { password } = req.body;
++  if (registration.stripeScheduleId || registration.stripeSubscriptionId || registration.stripeSubscriptionStatus) {
++    throw setupConflict("This member already has billing records. Refresh their subscription status.");
++  }
+   const stripe = getStripe();
++  const objectId = (value) => typeof value === "string" ? value : value?.id;
++  let previousSession = null;
++  if (registration.stripeCheckoutSessionId) {
++    previousSession = await stripe.checkout.sessions.retrieve(registration.stripeCheckoutSessionId);
++    if (previousSession.livemode || previousSession.mode !== "setup" ||
++        previousSession.metadata?.registrationId !== registration.id ||
++        objectId(previousSession.customer) !== registration.stripeCustomerId) {
++      throw setupConflict("Checkout does not match this registration");
++    }
++    if (previousSession.status === "complete") {
++      throw setupConflict("Card setup is already complete. Refresh the member; if they remain awaiting setup, check or retry the Stripe webhook.");
++    }
++  }
  
-@@ -121,8 +133,10 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
-     const frontendUrl = process.env.FRONTEND_URL;
+   const plans = {
+     MATCHES_AND_TRAINING: {
+@@ -53,7 +82,33 @@ async function createRegistrationCheckout(registration) {
+     throw new Error("Stripe price must match the monthly GBP test plan");
+   }
  
-     if (
--      !frontendUrl ||
--      req.get("origin") !== new URL(frontendUrl).origin
-+      !req.trudashAdmin && (
-+        !frontendUrl ||
-+        req.get("origin") !== new URL(frontendUrl).origin
-+      )
-     ) {
-       return res.status(403).json({ error: "Invalid request origin" });
++  const paymentStart = new Date(registration.firstPaymentDate).getTime();
++  if (!Number.isFinite(paymentStart)) throw setupConflict("First payment date is invalid");
+   let customerId = registration.stripeCustomerId;
++  if (customerId) {
++    const customer = await stripe.customers.retrieve(customerId);
++    if (customer.deleted || customer.livemode || customer.metadata?.registrationId !== registration.id) {
++      throw setupConflict("Stripe customer does not match this registration");
++    }
++    let billingNow = Date.now();
++    const clockId = objectId(customer.test_clock);
++    if (clockId) {
++      const clock = await stripe.testHelpers.testClocks.retrieve(clockId);
++      if (clock.status !== "ready") throw setupConflict("Stripe test clock must be ready");
++      billingNow = clock.frozen_time * 1000;
++    }
++    if (paymentStart <= billingNow) {
++      throw setupConflict("The original first payment date has passed on this customer's clock. Manual billing review is required; changing the configured clock does not move an existing customer.");
++    }
++  } else if (paymentStart <= Date.now()) {
++    throw setupConflict("The original first payment date has passed. Manual billing review is required.");
++  }
++  if (previousSession?.status === "open" && previousSession.url) {
++    return previousSession.url;
++  }
++  if (previousSession && previousSession.status !== "expired") {
++    throw setupConflict("Checkout is not ready to resume. Refresh and try again.");
++  }
+ 
+   if (!customerId) {
+     const testClockId = process.env.STRIPE_TEST_CLOCK_ID?.trim();
+@@ -136,15 +191,27 @@ if (testClockId) {
+       cancel_url: `${frontendUrl}/?paymentSetup=cancelled`,
+     },
+     {
+-      idempotencyKey: `registration-checkout-${registration.id}`,
++      // Concurrent retries for the same expired session create the same replacement.
++      idempotencyKey: previousSession
++        ? `registration-checkout-${registration.id}-after-${previousSession.id}`
++        : `registration-checkout-${registration.id}`,
      }
-@@ -524,8 +538,10 @@ router.post(
-     const frontendUrl = process.env.FRONTEND_URL;
+   );
  
-     if (
--      !frontendUrl ||
--      req.get("origin") !== new URL(frontendUrl).origin
-+      !req.trudashAdmin && (
-+        !frontendUrl ||
-+        req.get("origin") !== new URL(frontendUrl).origin
-+      )
-     ) {
-       return res.status(403).json({ error: "Invalid request origin" });
-     }
+-  await prisma.consentForm.update({
+-    where: { id: registration.id },
++  const saved = await prisma.consentForm.updateMany({
++    where: {
++      id: registration.id,
++      stripeCheckoutSessionId: registration.stripeCheckoutSessionId,
++      stripeScheduleId: null,
++      stripeSubscriptionId: null,
++      stripeSubscriptionStatus: null,
++    },
+     data: { stripeCheckoutSessionId: session.id },
+   });
+-
++  if (!saved.count) throw setupConflict("Billing details changed. Refresh the member before resuming setup.");
++  if (session.status !== "open" || !session.url) {
++    throw setupConflict("Checkout is no longer open. Refresh the member and retry setup if required.");
++  }
+   return session.url;
+ }
+ 
+diff --git a/frontend/src/Admin.jsx b/frontend/src/Admin.jsx
+index 756e3e1..3b55133 100644
+--- a/frontend/src/Admin.jsx
++++ b/frontend/src/Admin.jsx
+@@ -260,6 +260,8 @@ function ModalSection({ title, children }) {
+   );
+ }
+ function PaymentHistory({ registration, onSessionExpired, onBillingChanged, onInvoicesSynced }) {
++  const [settingUp, setSettingUp] = useState(false);
++  const [checkoutUrl, setCheckoutUrl] = useState("");
+   const [invoices, setInvoices] = useState([]);
+   const [loading, setLoading] = useState(true);
+   const [syncing, setSyncing] = useState(false);
+@@ -315,6 +317,29 @@ const [cancelling, setCancelling] = useState(false);
+       cancelled = true;
+     };
+   }, [endpoint, onSessionExpired]);
++  async function resumePaymentSetup() {
++    setSettingUp(true); setError(""); setMessage(""); setCheckoutUrl("");
++    try {
++      const data = await request(
++        `${API_URL}/api/admin` + `/registrations/${encodeURIComponent(registration.id)}/payment-setup`,
++        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }
++      );
++      const url = new URL(data.checkoutUrl);
++      if (url.protocol !== "https:" || url.hostname !== "checkout.stripe.com") {
++        throw new Error("Stripe returned an invalid setup link");
++      }
++      if (data.registration) onBillingChanged(data.registration);
++      setCheckoutUrl(url.href);
++      setMessage("Setup link ready. The member must complete card setup using this link.");
++    } catch (err) { setError(err.message); }
++    finally { setSettingUp(false); }
++  }
++
++  async function copySetupLink() {
++    try { await navigator.clipboard.writeText(checkoutUrl); setMessage("Setup link copied. Share it securely with this member."); }
++    catch { setError("Could not copy the link. Right-click Open secure setup and copy its link address."); }
++  }
++
+   async function cancelBilling() {
+   const playerName =
+     `${registration.playerFirstName} ${registration.playerSurname}`;
+@@ -423,12 +448,27 @@ const [cancelling, setCancelling] = useState(false);
+           value={billing(registration).label}
+         />
+       </div>
++      {!registration.stripeScheduleId && !registration.stripeSubscriptionId &&
++        !registration.stripeSubscriptionStatus && registration.paymentPlan && (
++          <div className="setup-actions">
++            <button type="button" className="download-btn" onClick={resumePaymentSetup}
++              disabled={loading || settingUp || syncing || cancelling}>
++              {settingUp ? "Preparing setup…" : "Resume payment setup"}
++            </button>
++            {checkoutUrl && <div style={{ margin: "12px 0" }}>
++              <a className="secondary-btn" href={checkoutUrl} target="_blank" rel="noopener noreferrer">Open secure setup</a>{" "}
++              <button type="button" className="secondary-btn" onClick={copySetupLink}>Copy setup link</button>
++              <p>This link is for this member's card setup. No payment is collected today.</p>
++            </div>}
++          </div>
++        )}
++
+       <button
+         type="button"
+         className="download-btn"
+         onClick={syncInvoices}
+      disabled={
+-  loading || syncing || cancelling || !registration.stripeSubscriptionId
++  loading || syncing || cancelling || settingUp || !registration.stripeSubscriptionId
+ }
+       >
+         {syncing ? "Syncing…" : "Sync invoices"}
+@@ -442,7 +482,7 @@ const [cancelling, setCancelling] = useState(false);
+       type="button"
+       className="delete-btn"
+       onClick={cancelBilling}
+-      disabled={loading || syncing || cancelling}
++      disabled={loading || syncing || cancelling || settingUp}
+       
+     >
+       {cancelling ? "Cancelling…" : "Cancel membership payments"}
