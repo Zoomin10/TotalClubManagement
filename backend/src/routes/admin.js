@@ -7,9 +7,17 @@ const { getStripe } = require("../services/stripeService");
 const {
   syncMembershipInvoice,
 } = require("../services/invoiceService");
+const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
 const router = express.Router();
 
 function requireAdmin(req, res, next) {
+  if (req.get("x-trudash-assertion")) {
+    if (verifyTrudashAdmin(req, res)) return next();
+    return;
+  }
+  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
+    return res.status(401).json({ error: "Sign in through TruDash" });
+  }
   const token = req.cookies?.admin_token;
 
   if (!token) {
@@ -17,7 +25,8 @@ function requireAdmin(req, res, next) {
   }
 
   try {
-    jwt.verify(token, process.env.JWT_SECRET);
+    const claims = jwt.verify(token, process.env.JWT_SECRET);
+    if (claims.role !== "admin") throw new Error("Admin role required");
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid or expired admin session" });
@@ -25,6 +34,9 @@ function requireAdmin(req, res, next) {
 }
 
 router.post("/login", (req, res) => {
+  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
+    return res.status(403).json({ error: "Use Microsoft sign-in through TruDash" });
+  }
   try {
     const { password } = req.body;
 
@@ -121,8 +133,10 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL;
 
     if (
-      !frontendUrl ||
-      req.get("origin") !== new URL(frontendUrl).origin
+      !req.trudashAdmin && (
+        !frontendUrl ||
+        req.get("origin") !== new URL(frontendUrl).origin
+      )
     ) {
       return res.status(403).json({ error: "Invalid request origin" });
     }
@@ -524,8 +538,10 @@ router.post(
     const frontendUrl = process.env.FRONTEND_URL;
 
     if (
-      !frontendUrl ||
-      req.get("origin") !== new URL(frontendUrl).origin
+      !req.trudashAdmin && (
+        !frontendUrl ||
+        req.get("origin") !== new URL(frontendUrl).origin
+      )
     ) {
       return res.status(403).json({ error: "Invalid request origin" });
     }

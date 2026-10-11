@@ -1,0 +1,107 @@
+diff --git a/backend/src/middleware/trudashAdmin.js b/backend/src/middleware/trudashAdmin.js
+new file mode 100644
+index 0000000..0bbba46
+--- /dev/null
++++ b/backend/src/middleware/trudashAdmin.js
+@@ -0,0 +1,33 @@
++const crypto = require("crypto");
++const jwt = require("jsonwebtoken");
++const seen = new Map();
++
++// Only server-signed assertions are trusted; browser identity headers are not.
++function verifyTrudashAdmin(req, res) {
++  const assertion = req.get("x-trudash-assertion");
++  if (!assertion) return false;
++  try {
++    const secret = process.env.TRUDASH_MEMBERSHIP_SHARED_SECRET;
++    if (!secret || Buffer.byteLength(secret) < 32) throw new Error("Bridge not configured");
++    const claims = jwt.verify(assertion, secret, {
++      algorithms: ["HS256"], issuer: "trudash", audience: "tcm-membership-admin",
++      maxAge: "30s", clockTolerance: 2,
++    });
++    const hash = crypto.createHash("sha256").update(JSON.stringify(req.body || null)).digest("hex");
++    if (claims.role !== "membership_admin" || typeof claims.sub !== "string" ||
++        claims.method !== req.method || claims.path !== req.originalUrl || claims.bodyHash !== hash ||
++        typeof claims.jti !== "string" || !Number.isInteger(claims.exp)) {
++      throw new Error("Invalid bridge claims");
++    }
++    const now = Math.floor(Date.now() / 1000);
++    for (const [id, expiry] of seen) if (expiry + 2 < now) seen.delete(id);
++    if (seen.has(claims.jti) || seen.size >= 10000) throw new Error("Invalid or replayed assertion");
++    seen.set(claims.jti, claims.exp);
++    req.trudashAdmin = { username: claims.sub };
++    return true;
++  } catch {
++    res.status(401).json({ error: "Invalid or expired TruDash authorization" });
++    return false;
++  }
++}
++module.exports = { verifyTrudashAdmin };
+diff --git a/backend/src/routes/admin.js b/backend/src/routes/admin.js
+index 79857da..a429180 100644
+--- a/backend/src/routes/admin.js
++++ b/backend/src/routes/admin.js
+@@ -7,9 +7,17 @@ const { getStripe } = require("../services/stripeService");
+ const {
+   syncMembershipInvoice,
+ } = require("../services/invoiceService");
++const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
+ const router = express.Router();
+ 
+ function requireAdmin(req, res, next) {
++  if (req.get("x-trudash-assertion")) {
++    if (verifyTrudashAdmin(req, res)) return next();
++    return;
++  }
++  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
++    return res.status(401).json({ error: "Sign in through TruDash" });
++  }
+   const token = req.cookies?.admin_token;
+ 
+   if (!token) {
+@@ -17,7 +25,8 @@ function requireAdmin(req, res, next) {
+   }
+ 
+   try {
+-    jwt.verify(token, process.env.JWT_SECRET);
++    const claims = jwt.verify(token, process.env.JWT_SECRET);
++    if (claims.role !== "admin") throw new Error("Admin role required");
+     next();
+   } catch (err) {
+     return res.status(401).json({ error: "Invalid or expired admin session" });
+@@ -25,6 +34,9 @@ function requireAdmin(req, res, next) {
+ }
+ 
+ router.post("/login", (req, res) => {
++  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
++    return res.status(403).json({ error: "Use Microsoft sign-in through TruDash" });
++  }
+   try {
+     const { password } = req.body;
+ 
+@@ -121,8 +133,10 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
+     const frontendUrl = process.env.FRONTEND_URL;
+ 
+     if (
+-      !frontendUrl ||
+-      req.get("origin") !== new URL(frontendUrl).origin
++      !req.trudashAdmin && (
++        !frontendUrl ||
++        req.get("origin") !== new URL(frontendUrl).origin
++      )
+     ) {
+       return res.status(403).json({ error: "Invalid request origin" });
+     }
+@@ -524,8 +538,10 @@ router.post(
+     const frontendUrl = process.env.FRONTEND_URL;
+ 
+     if (
+-      !frontendUrl ||
+-      req.get("origin") !== new URL(frontendUrl).origin
++      !req.trudashAdmin && (
++        !frontendUrl ||
++        req.get("origin") !== new URL(frontendUrl).origin
++      )
+     ) {
+       return res.status(403).json({ error: "Invalid request origin" });
+     }
