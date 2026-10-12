@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const { z } = require("zod");
 const prisma = require("../prisma");
-const roles = ["Committee Member", "Trustee", "Team Manager", "Team Coach", "Assistant Coach", "Marketing", "Events", "Social Media Manager", "Social Impact Manager", "Fundraising Manager", "Treasurer", "Club Secretary", "Chair", "Vice-Chair", "Facility Liaison Manager"];
+const roles = ["Trustee", "Committee Member", "Chair", "Vice-Chair", "Welfare Officer", "Treasurer", "Club Secretary", "Team Manager", "Team Coach", "Assistant Coach", "Team Secretary",  "Marketing", "Events", "Social Media Manager", "Social Impact Manager", "Fundraising Manager", "Facility Liaison Manager"];
 const footballRoles = ["Team Manager", "Team Coach", "Assistant Coach"];
 const roleSchema = z.array(z.enum(roles)).max(roles.length).refine(a => new Set(a).size === a.length, "Duplicate roles");
 const publishedAgreements = require("../content/volunteerAgreements.json");
