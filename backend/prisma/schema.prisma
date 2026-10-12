@@ -92,3 +92,47 @@ enum PaymentPlan {
   MATCHES_AND_TRAINING
   TRAINING_ONLY
 }
+
+model ClubVolunteer {
+  id                       String                @id @default(cuid())
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+  firstName                String
+  lastName                 String
+  email                    String                @unique
+  phone                    String
+  team                     String?
+  requestedRoles           Json
+  assignedRoles            Json
+  accessRole               String                @default("NONE")
+  status                   String                @default("AWAITING_REVIEW")
+  notes                    String                @default("")
+  acceptanceTokenHash      String?               @unique
+  acceptanceTokenExpiresAt DateTime?
+  acceptances              VolunteerAcceptance[]
+  changes                  VolunteerChange[]
+}
+
+model VolunteerAcceptance {
+  id          String        @id @default(cuid())
+  volunteerId String
+  volunteer   ClubVolunteer @relation(fields: [volunteerId], references: [id], onDelete: Restrict)
+  agreement   String
+  version     String
+  content     String
+  acceptedAt  DateTime      @default(now())
+
+  @@unique([volunteerId, agreement, version])
+}
+
+model VolunteerChange {
+  id          String        @id @default(cuid())
+  volunteerId String
+  volunteer   ClubVolunteer @relation(fields: [volunteerId], references: [id], onDelete: Restrict)
+  actor       String
+  action      String
+  details     Json
+  createdAt   DateTime      @default(now())
+
+  @@index([volunteerId, createdAt])
+}

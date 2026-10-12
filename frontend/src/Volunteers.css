@@ -1,0 +1,26 @@
+
+.volunteer-ui { color:#10245c; font-family:inherit; padding:24px; max-width:1200px; margin:auto; }
+.volunteer-ui h1 { font-size:2rem; margin:8px 0; }
+.volunteer-ui .v-card { background:white; border:1px solid #dce3ef; border-radius:16px; padding:24px; margin:18px 0; box-shadow:0 4px 18px #10245c08; }
+.volunteer-ui .v-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.volunteer-ui label { display:block; font-weight:600; }
+.volunteer-ui input:not([type=checkbox]), .volunteer-ui select, .volunteer-ui textarea { width:100%; padding:10px; border:1px solid #b7c5dc; border-radius:8px; box-sizing:border-box; margin-top:6px; background:white; color:#10245c; }
+.volunteer-ui .v-check { display:flex; align-items:flex-start; gap:10px; font-weight:400; margin:10px 0; }
+.volunteer-ui input[type=checkbox] { width:18px; height:18px; margin:2px 0; flex-shrink:0; }
+.volunteer-ui button, .volunteer-ui .v-button { background:#153ea3; color:white; border:0; border-radius:8px; padding:10px 16px; cursor:pointer; display:inline-block; text-decoration:none; }
+.volunteer-ui button:disabled { opacity:.5; cursor:wait; }
+.volunteer-ui .v-actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:18px; }
+.volunteer-ui .v-error { color:#991b1b; background:#fff1f2; padding:12px; border-radius:8px; }
+.volunteer-ui .v-success { color:#166534; background:#f0fdf4; padding:12px; border-radius:8px; }
+.volunteer-ui .v-agreement { max-height:320px; overflow:auto; white-space:pre-wrap; border:1px solid #dce3ef; background:#f8fafc; border-radius:8px; padding:16px; line-height:1.6; }
+.volunteer-ui .v-table { overflow:auto; }
+.volunteer-ui table { width:100%; border-collapse:collapse; }
+.volunteer-ui th, .volunteer-ui td { text-align:left; padding:12px; border-bottom:1px solid #e2e8f0; vertical-align:top; }
+.volunteer-ui th { background:#f4f6fb; }
+.volunteer-ui .v-muted { color:#566887; font-size:.9rem; }
+.volunteer-ui .v-badge { display:inline-block; padding:5px 9px; border-radius:20px; background:#eef2ff; font-size:.8rem; }
+.volunteer-ui .v-dialog { position:fixed; inset:0; z-index:2000; background:#0f172a80; display:flex; align-items:center; justify-content:center; padding:20px; }
+.volunteer-ui .v-panel { background:white; border-radius:16px; padding:24px; max-width:850px; width:100%; max-height:90vh; overflow:auto; }
+.volunteer-ui .v-header { display:flex; justify-content:space-between; gap:16px; align-items:center; }
+.volunteer-ui :focus-visible { outline:3px solid #548cf8; outline-offset:3px; }
+@media(max-width:650px) { .volunteer-ui { padding:14px; } .volunteer-ui .v-grid { grid-template-columns:1fr; } .volunteer-ui .v-card { padding:16px; } }
