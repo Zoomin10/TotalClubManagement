@@ -37,6 +37,7 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
+app.use("/api/social-media/admin", require("./routes/socialMedia"));
 app.use("/api/volunteers", require("./routes/volunteers"));
 app.use("/api/consent", consentRoutes);
 app.use("/api/admin", adminRoutes);

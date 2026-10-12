@@ -136,3 +136,14 @@ model VolunteerChange {
 
   @@index([volunteerId, createdAt])
 }
+
+model SocialMediaPost {
+  id        String   @id @default(cuid())
+  url       String   @unique
+  platform  String
+  title     String
+  createdBy String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
