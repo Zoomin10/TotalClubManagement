@@ -28,6 +28,7 @@ export default function Admin() {
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [canExportFullCsv, setCanExportFullCsv] = useState(false);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
   const [filters, setFilters] = useState(emptyFilters);
@@ -55,6 +56,7 @@ export default function Admin() {
       if (generation !== sessionGeneration.current || sequence !== requestNumber.current) return;
       if (!Array.isArray(data.members)) throw new Error("Invalid members response");
       setMembers(data.members); setLoaded(true);
+      setCanExportFullCsv(data.permissions?.fullCsvExport === true);
       setSelected((current) => current ? data.members.find((member) => member.id === current.id) || null : null);
     } catch (err) {
       if (generation === sessionGeneration.current && sequence === requestNumber.current) setError(err.message);
@@ -106,6 +108,7 @@ export default function Admin() {
     finally { setLoginBusy(false); }
   }
   async function downloadCsv() {
+    if (!canExportFullCsv || !window.confirm("This full report includes medical declarations, allergies and personal contact details. Download only for an authorised purpose and store it securely. Continue?")) return;
     setExporting(true); setError("");
     try {
       const response = await fetch(`${API_URL}/api/admin/registrations.csv`, { credentials: "include" });
@@ -166,7 +169,7 @@ async function deleteMember(member) {
   </section></main>;
   return <main className="admin-page">
     <header className="admin-header"><div className="club-brand"><img src="/wwfc-letter-head.png" alt="WWFC" className="admin-logo" /><div><strong>Total Club Management</strong><span>Wroughton & Wichelstowe FC</span></div></div><div className="header-actions"><Badge tone="blue">Stripe test pilot</Badge><button className="logout-btn" onClick={logout}>Sign out</button></div></header>
-    <div className="members-shell"><div className="page-heading"><div><p className="eyebrow">CLUB OPERATIONS</p><h1>Members</h1><p>Manage registrations, subscriptions and payment history.</p></div><div className="heading-actions"><button className="secondary-btn" disabled={loading} onClick={refreshMembers}>{loading ? "Refreshing…" : "Refresh members"}</button><button className="download-btn" onClick={downloadCsv} disabled={exporting}>{exporting ? "Exporting…" : "Export registrations"}</button></div></div>
+    <div className="members-shell"><div className="page-heading"><div><p className="eyebrow">CLUB OPERATIONS</p><h1>Members</h1><p>Manage registrations, subscriptions and payment history.</p></div><div className="heading-actions"><button className="secondary-btn" disabled={loading} onClick={refreshMembers}>{loading ? "Refreshing…" : "Refresh members"}</button>{canExportFullCsv && <button className="download-btn" onClick={downloadCsv} disabled={exporting}>{exporting ? "Exporting…" : "Full CSV (includes medical)"}</button>}</div></div>
     {error && <p className="error" role="alert">{error}</p>}
     <section className="stats-grid" aria-label="Club membership summary">
       <Metric label="Total members" value={loaded ? members.length : "—"} note="All saved registrations" />
@@ -216,7 +219,7 @@ function MemberPanel({ registration, onClose, onSessionExpired, onBillingChanged
   const state = billing(registration);
   return <div className="modal-backdrop" onClick={onClose}><div ref={panel} className="modal-card" role="dialog" aria-modal="true" aria-labelledby="member-panel-title" onClick={(event) => event.stopPropagation()}>
     <div className="modal-header"><div><p className="eyebrow">MEMBER PROFILE</p><h2 id="member-panel-title">{name(registration)}</h2><p>{registration.wwfcTeam || "Team not recorded"} · {String(registration.ageGroup).toUpperCase()}</p><Badge tone={state.tone}>{state.label}</Badge></div><button ref={close} className="modal-close" aria-label="Close member details" onClick={onClose}>×</button></div>
-    <div className="member-tabs profile-tabs">{[["payments", "Payments"], ["details", "Member details"], ["consent", "Consent & medical"]].map(([key, label]) => <button key={key} aria-pressed={tab === key} className={tab === key ? "is-active" : ""} onClick={() => setTab(key)}>{label}</button>)}</div>
+    <div className="member-tabs profile-tabs">{[["payments", "Payments"], ["details", "Member details"], ["consent", "Consent"]].map(([key, label]) => <button key={key} aria-pressed={tab === key} className={tab === key ? "is-active" : ""} onClick={() => setTab(key)}>{label}</button>)}</div>
     <div hidden={tab !== "payments"}><PaymentHistory registration={registration} onSessionExpired={onSessionExpired} onBillingChanged={onBillingChanged} onInvoicesSynced={onInvoicesSynced} /></div>
     {tab === "details" && <><ModalSection title="Player details"><Detail label="Team" value={registration.wwfcTeam} /><Detail label="Age group" value={String(registration.ageGroup).toUpperCase()} /><Detail label="Gender" value={registration.playerSex} /><Detail label="Date of birth" value={date(registration.playerDob)} /><Detail label="Registered" value={date(registration.createdAt)} /><Detail label="Registration reference" value={registration.id} /><Detail label="Email" value={registration.email} /><Detail label="Postcode" value={registration.postcode} /><Detail label="House number" value={registration.houseNumber} /></ModalSection>{[registration.emergencyContact1, registration.emergencyContact2].map((contact, index) => <ModalSection key={index} title={`Parent / emergency contact ${index + 1}`}><Detail label="Name" value={contact?.name} /><Detail label="Relationship" value={contact?.relationship} /><Detail label="Phone" value={contact?.phoneNumber} /><Detail label="Email" value={contact?.email} /><Detail label="Date of birth" value={date(contact?.dob)} /><Detail label="Postcode" value={contact?.postcode} /><Detail label="House number" value={contact?.houseNumber} /></ModalSection>)}
         {(
@@ -239,7 +242,7 @@ function MemberPanel({ registration, onClose, onSessionExpired, onBillingChanged
     )}
   </>
 }
-    {tab === "consent" && <><ModalSection title="Medical information"><Detail label="Medical information" value={registration.medicalInfo} wide /><Detail label="Allergies" value={registration.allergies} wide /></ModalSection><ModalSection title="Permissions"><Detail label="Contact consent" value={registration.consentData ? "Yes" : "No"} /><Detail label="Photo consent" value={registration.consentPhotos ? "Yes" : "No"} /><Detail label="Video consent" value={registration.consentVideos ? "Yes" : "No"} /><Detail label="Walk home alone" value={registration.consentWalkHome == null ? "Not applicable" : registration.consentWalkHome ? "Yes" : "No"} />{registration.acceptedPrivacyPolicy != null && <Detail label="Privacy policy accepted" value={registration.acceptedPrivacyPolicy ? "Yes" : "No"} />}</ModalSection><ModalSection title="Signature"><Detail label="Signed by" value={registration.parentName} /><Detail label="Signature" value={registration.parentSignature} /><Detail label="Signature date" value={date(registration.signatureDate)} /></ModalSection></>}
+    {tab === "consent" && <><ModalSection title="Permissions"><Detail label="Contact consent" value={registration.consentData ? "Yes" : "No"} /><Detail label="Photo consent" value={registration.consentPhotos ? "Yes" : "No"} /><Detail label="Video consent" value={registration.consentVideos ? "Yes" : "No"} /><Detail label="Walk home alone" value={registration.consentWalkHome == null ? "Not applicable" : registration.consentWalkHome ? "Yes" : "No"} />{registration.acceptedPrivacyPolicy != null && <Detail label="Privacy policy accepted" value={registration.acceptedPrivacyPolicy ? "Yes" : "No"} />}</ModalSection><ModalSection title="Signature"><Detail label="Signed by" value={registration.parentName} /><Detail label="Signature" value={registration.parentSignature} /><Detail label="Signature date" value={date(registration.signatureDate)} /></ModalSection></>}
   </div></div>;
 }
 

@@ -23,7 +23,7 @@ function verifyTrudashAdmin(req, res) {
     for (const [id, expiry] of seen) if (expiry + 2 < now) seen.delete(id);
     if (seen.has(claims.jti) || seen.size >= 10000) throw new Error("Invalid or replayed assertion");
     seen.set(claims.jti, claims.exp);
-    req.trudashAdmin = { username: claims.sub, volunteerSuperAdmin: claims.volunteerSuperAdmin === true };
+    req.trudashAdmin = { username: claims.sub, volunteerSuperAdmin: claims.volunteerSuperAdmin === true, fullCsvExport: claims.fullCsvExport === true };
     return true;
   } catch {
     res.status(401).json({ error: "Invalid or expired TruDash authorization" });

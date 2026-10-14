@@ -1,118 +1,281 @@
-diff --git a/backend/prisma/migrations/20261012113500_add_social_media_posts/migration.sql b/backend/prisma/migrations/20261012113500_add_social_media_posts/migration.sql
+diff --git a/backend/prisma/migrations/20261014102500_add_report_export_audit/migration.sql b/backend/prisma/migrations/20261014102500_add_report_export_audit/migration.sql
 new file mode 100644
-index 0000000..520b812
+index 0000000..4c37a32
 --- /dev/null
-+++ b/backend/prisma/migrations/20261012113500_add_social_media_posts/migration.sql
-@@ -0,0 +1,17 @@
-+-- CreateTable
-+CREATE TABLE "SocialMediaPost" (
++++ b/backend/prisma/migrations/20261014102500_add_report_export_audit/migration.sql
+@@ -0,0 +1,9 @@
++CREATE TABLE "ReportExportAudit" (
 +    "id" TEXT NOT NULL,
-+    "url" TEXT NOT NULL,
-+    "platform" TEXT NOT NULL,
-+    "title" TEXT NOT NULL,
-+    "createdBy" TEXT NOT NULL,
 +    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-+
-+    CONSTRAINT "SocialMediaPost_pkey" PRIMARY KEY ("id")
++    "actor" TEXT NOT NULL,
++    "report" TEXT NOT NULL,
++    "recordCount" INTEGER NOT NULL,
++    CONSTRAINT "ReportExportAudit_pkey" PRIMARY KEY ("id")
 +);
-+
-+-- CreateIndex
-+CREATE UNIQUE INDEX "SocialMediaPost_url_key" ON "SocialMediaPost"("url");
-+
-+-- CreateIndex
-+CREATE INDEX "SocialMediaPost_createdAt_idx" ON "SocialMediaPost"("createdAt");
++CREATE INDEX "ReportExportAudit_createdAt_idx" ON "ReportExportAudit"("createdAt");
 diff --git a/backend/prisma/schema.prisma b/backend/prisma/schema.prisma
-index 69e08c1..1c031b1 100644
+index 1c031b1..61d0129 100644
 --- a/backend/prisma/schema.prisma
 +++ b/backend/prisma/schema.prisma
-@@ -136,3 +136,14 @@ model VolunteerChange {
+@@ -147,3 +147,14 @@ model SocialMediaPost {
  
-   @@index([volunteerId, createdAt])
+   @@index([createdAt])
  }
 +
-+model SocialMediaPost {
-+  id        String   @id @default(cuid())
-+  url       String   @unique
-+  platform  String
-+  title     String
-+  createdBy String
-+  createdAt DateTime @default(now())
++// Metadata only; never store exported medical values or the CSV here.
++model ReportExportAudit {
++  id          String   @id @default(cuid())
++  createdAt   DateTime @default(now())
++  actor       String
++  report      String
++  recordCount Int
 +
 +  @@index([createdAt])
 +}
-diff --git a/backend/src/app.js b/backend/src/app.js
-index 5f0a3a9..5adc0ba 100644
---- a/backend/src/app.js
-+++ b/backend/src/app.js
-@@ -37,6 +37,7 @@ app.use(
- app.use(express.json());
- app.use(cookieParser());
+diff --git a/backend/src/middleware/trudashAdmin.js b/backend/src/middleware/trudashAdmin.js
+index af96b9a..6ac65c6 100644
+--- a/backend/src/middleware/trudashAdmin.js
++++ b/backend/src/middleware/trudashAdmin.js
+@@ -23,7 +23,7 @@ function verifyTrudashAdmin(req, res) {
+     for (const [id, expiry] of seen) if (expiry + 2 < now) seen.delete(id);
+     if (seen.has(claims.jti) || seen.size >= 10000) throw new Error("Invalid or replayed assertion");
+     seen.set(claims.jti, claims.exp);
+-    req.trudashAdmin = { username: claims.sub, volunteerSuperAdmin: claims.volunteerSuperAdmin === true };
++    req.trudashAdmin = { username: claims.sub, volunteerSuperAdmin: claims.volunteerSuperAdmin === true, fullCsvExport: claims.fullCsvExport === true };
+     return true;
+   } catch {
+     res.status(401).json({ error: "Invalid or expired TruDash authorization" });
+diff --git a/backend/src/routes/admin.js b/backend/src/routes/admin.js
+index f1b4647..55ed9ae 100644
+--- a/backend/src/routes/admin.js
++++ b/backend/src/routes/admin.js
+@@ -8,7 +8,9 @@ const {
+   syncMembershipInvoice,
+ } = require("../services/invoiceService");
+ const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
++const { memberSelect, memberView } = require("../services/memberView");
+ const router = express.Router();
++router.use((req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
  
-+app.use("/api/social-media/admin", require("./routes/socialMedia"));
- app.use("/api/volunteers", require("./routes/volunteers"));
- app.use("/api/consent", consentRoutes);
- app.use("/api/admin", adminRoutes);
-diff --git a/backend/src/routes/socialMedia.js b/backend/src/routes/socialMedia.js
-new file mode 100644
-index 0000000..335d330
---- /dev/null
-+++ b/backend/src/routes/socialMedia.js
-@@ -0,0 +1,34 @@
-+const express = require("express");
-+const { z } = require("zod");
-+const prisma = require("../prisma");
-+const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
-+const { normalisePostUrl } = require("../services/socialMediaService");
-+const router = express.Router();
-+router.use((req, res, next) => {
-+  res.set("Cache-Control", "no-store");
-+  if (!req.get("x-trudash-assertion")) return res.status(401).json({ error: "Sign in through TruDash" });
-+  if (verifyTrudashAdmin(req, res)) next();
-+});
-+router.get("/", async (req, res) => {
-+  try {
-+    const posts = await prisma.socialMediaPost.findMany({ orderBy: { createdAt: "desc" } });
-+    res.json({ posts });
-+  } catch { res.status(500).json({ error: "Social media posts could not be loaded." }); }
-+});
-+router.post("/", async (req, res) => {
-+  const parsed = z.object({ url: z.string().trim().min(1).max(2000), title: z.string().trim().max(150).default("") }).safeParse(req.body);
-+  if (!parsed.success) return res.status(400).json({ error: "Please check the post URL and title." });
-+  let details;
-+  try { details = normalisePostUrl(parsed.data.url); }
-+  catch (error) { return res.status(400).json({ error: error.message }); }
-+  try {
-+    const post = await prisma.socialMediaPost.upsert({ where: { url: details.url }, update: {}, create: { ...details, title: parsed.data.title, createdBy: req.trudashAdmin.username } });
-+    res.json(post);
-+  } catch { res.status(500).json({ error: "The post link could not be saved." }); }
-+});
-+router.delete("/:id", async (req, res) => {
-+  if (req.body?.confirm !== true) return res.status(400).json({ error: "Removal confirmation is required." });
-+  try { await prisma.socialMediaPost.delete({ where: { id: req.params.id } }); res.json({ success: true }); }
-+  catch (error) { res.status(error.code === "P2025" ? 404 : 500).json({ error: error.code === "P2025" ? "Post link not found." : "The post link could not be removed." }); }
-+});
-+module.exports = router;
-diff --git a/backend/src/services/socialMediaService.js b/backend/src/services/socialMediaService.js
-new file mode 100644
-index 0000000..8f2023f
---- /dev/null
-+++ b/backend/src/services/socialMediaService.js
-@@ -0,0 +1,18 @@
-+function normalisePostUrl(value) {
-+  let url;
-+  try { url = new URL(value); } catch { throw new Error("Please enter a full Facebook or Instagram post URL."); }
-+  if (url.protocol !== "https:" || url.username || url.password) throw new Error("Please use a public HTTPS post URL.");
-+  const host = url.hostname.toLowerCase();
-+  if (["www.instagram.com", "instagram.com"].includes(host) && /^\/(p|reel)\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)) {
-+    return { platform: "INSTAGRAM", url: `https://www.instagram.com${url.pathname.replace(/\/$/, "")}/` };
+ function requireAdmin(req, res, next) {
+   if (req.get("x-trudash-assertion")) {
+@@ -121,7 +123,7 @@ router.get("/registrations", requireAdmin, async (req, res) => {
+       orderBy: { createdAt: "desc" },
+     });
+ 
+-    res.json(registrations);
++    res.json(registrations.map(memberView));
+   } catch (err) {
+     console.error(err);
+     res.status(500).json({ error: "Failed to load registrations" });
+@@ -310,6 +312,9 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
+ });
+ 
+ router.get("/registrations.csv", requireAdmin, async (req, res) => {
++  if (!req.trudashAdmin?.fullCsvExport) {
++    return res.status(403).json({ error: "Full registration export permission required. Use an authorised Microsoft account through TruDash." });
 +  }
-+  if (["www.facebook.com", "facebook.com", "m.facebook.com"].includes(host)) {
-+    if (/^\/WroughtonYFC\/posts\/[A-Za-z0-9_-]+\/?$/i.test(url.pathname)) {
-+      const id = url.pathname.split("/")[3];
-+      return { platform: "FACEBOOK", url: `https://www.facebook.com/WroughtonYFC/posts/${id}/` };
-+    }
-+    if (/^\/reel\/\d+\/?$/.test(url.pathname)) return { platform: "FACEBOOK", url: `https://www.facebook.com${url.pathname.replace(/\/$/, "")}/` };
-+  }
-+  throw new Error("Use a Facebook post from WroughtonYFC, a Facebook reel, or an Instagram post/reel permalink. Profile and shortened share links are not supported.");
+   try {
+     const forms = await prisma.consentForm.findMany({
+       orderBy: { createdAt: "desc" },
+@@ -414,6 +419,12 @@ const csv =
+     res.header("Content-Type", "text/csv");
+ const today = new Date().toLocaleDateString("en-GB").replace(/\//g, "-");
+ res.attachment(`wwfc-registrations-${today}.csv`);
++    // Record generation before release. If auditing fails, do not release health data.
++    await prisma.reportExportAudit.create({ data: {
++      actor: req.trudashAdmin.username,
++      report: "FULL_REGISTRATIONS_WITH_MEDICAL",
++      recordCount: forms.length,
++    } });
+     res.send(csv);
+   } catch (err) {
+     console.error(err);
+@@ -668,7 +679,7 @@ router.post(
+       });
+ 
+       return res.json({
+-        registration: updated,
++        registration: memberView(updated),
+         message:
+           "Membership payments cancelled. Registration and invoices retained.",
+       });
+@@ -689,7 +700,8 @@ router.get("/members", requireAdmin, async (req, res) => {
+   try {
+     const registrations = await prisma.consentForm.findMany({
+       orderBy: { createdAt: "desc" },
+-      include: {
++      select: {
++        ...memberSelect,
+         invoices: {
+           where: { status: "open" },
+           select: {
+@@ -707,7 +719,7 @@ router.get("/members", requireAdmin, async (req, res) => {
+         );
+ 
+         return {
+-          ...registration,
++          ...memberView(registration),
+           invoiceSummary: {
+             outstandingPence: gbpInvoices.reduce(
+               (total, invoice) =>
+@@ -722,7 +734,7 @@ router.get("/members", requireAdmin, async (req, res) => {
+       }
+     );
+ 
+-    res.json({ members });
++    res.json({ members, permissions: { fullCsvExport: req.trudashAdmin?.fullCsvExport === true } });
+   } catch (error) {
+     console.error("Failed to load members:", error);
+ 
+@@ -743,7 +755,7 @@ router.post("/registrations/:id/payment-setup", requireAdmin, async (req, res) =
+     if (!registration) return res.status(404).json({ error: "Member not found" });
+     const checkoutUrl = await createRegistrationCheckout(registration);
+     const updated = await prisma.consentForm.findUnique({ where: { id: registration.id } });
+-    res.json({ checkoutUrl, registration: updated });
++    res.json({ checkoutUrl, registration: memberView(updated) });
+   } catch (error) {
+     console.error("Resume payment setup failed:", error.message);
+     res.status(error.statusCode || 500).json({
+diff --git a/backend/src/services/memberView.js b/backend/src/services/memberView.js
+new file mode 100644
+index 0000000..efe30c1
+--- /dev/null
++++ b/backend/src/services/memberView.js
+@@ -0,0 +1,16 @@
++// Browser-visible member fields. Medical declarations remain in storage and the
++// explicitly authorised full export, never in ordinary directory/billing JSON.
++const memberFields = [
++  'id','createdAt','ageGroup','wwfcTeam','playerFirstName','playerSurname',
++  'playerDob','playerSex','emergencyContact1','emergencyContact2','postcode',
++  'houseNumber','email','photoUrl','consentData','consentPhotos','consentVideos',
++  'consentWalkHome','parentSignature','parentName','signatureDate','stripeScheduleId',
++  'paymentPlan','monthlyAmountPence','firstPaymentDate','stripeCustomerId',
++  'stripeSubscriptionId','stripeCheckoutSessionId','stripeSubscriptionStatus',
++];
++const memberSelect = Object.fromEntries(memberFields.map(field => [field, true]));
++function memberView(member) {
++  if (!member) return member;
++  return Object.fromEntries(memberFields.filter(field => Object.hasOwn(member, field)).map(field => [field, member[field]]));
 +}
-+module.exports = { normalisePostUrl };
++module.exports = { memberSelect, memberView };
+diff --git a/frontend/src/Admin.jsx b/frontend/src/Admin.jsx
+index 3b55133..3128fc3 100644
+--- a/frontend/src/Admin.jsx
++++ b/frontend/src/Admin.jsx
+@@ -28,6 +28,7 @@ export default function Admin() {
+   const [loaded, setLoaded] = useState(false);
+   const [loading, setLoading] = useState(false);
+   const [exporting, setExporting] = useState(false);
++  const [canExportFullCsv, setCanExportFullCsv] = useState(false);
+   const [error, setError] = useState("");
+   const [selected, setSelected] = useState(null);
+   const [filters, setFilters] = useState(emptyFilters);
+@@ -55,6 +56,7 @@ export default function Admin() {
+       if (generation !== sessionGeneration.current || sequence !== requestNumber.current) return;
+       if (!Array.isArray(data.members)) throw new Error("Invalid members response");
+       setMembers(data.members); setLoaded(true);
++      setCanExportFullCsv(data.permissions?.fullCsvExport === true);
+       setSelected((current) => current ? data.members.find((member) => member.id === current.id) || null : null);
+     } catch (err) {
+       if (generation === sessionGeneration.current && sequence === requestNumber.current) setError(err.message);
+@@ -106,6 +108,7 @@ export default function Admin() {
+     finally { setLoginBusy(false); }
+   }
+   async function downloadCsv() {
++    if (!canExportFullCsv || !window.confirm("This full report includes medical declarations, allergies and personal contact details. Download only for an authorised purpose and store it securely. Continue?")) return;
+     setExporting(true); setError("");
+     try {
+       const response = await fetch(`${API_URL}/api/admin/registrations.csv`, { credentials: "include" });
+@@ -166,7 +169,7 @@ async function deleteMember(member) {
+   </section></main>;
+   return <main className="admin-page">
+     <header className="admin-header"><div className="club-brand"><img src="/wwfc-letter-head.png" alt="WWFC" className="admin-logo" /><div><strong>Total Club Management</strong><span>Wroughton & Wichelstowe FC</span></div></div><div className="header-actions"><Badge tone="blue">Stripe test pilot</Badge><button className="logout-btn" onClick={logout}>Sign out</button></div></header>
+-    <div className="members-shell"><div className="page-heading"><div><p className="eyebrow">CLUB OPERATIONS</p><h1>Members</h1><p>Manage registrations, subscriptions and payment history.</p></div><div className="heading-actions"><button className="secondary-btn" disabled={loading} onClick={refreshMembers}>{loading ? "Refreshing…" : "Refresh members"}</button><button className="download-btn" onClick={downloadCsv} disabled={exporting}>{exporting ? "Exporting…" : "Export registrations"}</button></div></div>
++    <div className="members-shell"><div className="page-heading"><div><p className="eyebrow">CLUB OPERATIONS</p><h1>Members</h1><p>Manage registrations, subscriptions and payment history.</p></div><div className="heading-actions"><button className="secondary-btn" disabled={loading} onClick={refreshMembers}>{loading ? "Refreshing…" : "Refresh members"}</button>{canExportFullCsv && <button className="download-btn" onClick={downloadCsv} disabled={exporting}>{exporting ? "Exporting…" : "Full CSV (includes medical)"}</button>}</div></div>
+     {error && <p className="error" role="alert">{error}</p>}
+     <section className="stats-grid" aria-label="Club membership summary">
+       <Metric label="Total members" value={loaded ? members.length : "—"} note="All saved registrations" />
+@@ -216,7 +219,7 @@ function MemberPanel({ registration, onClose, onSessionExpired, onBillingChanged
+   const state = billing(registration);
+   return <div className="modal-backdrop" onClick={onClose}><div ref={panel} className="modal-card" role="dialog" aria-modal="true" aria-labelledby="member-panel-title" onClick={(event) => event.stopPropagation()}>
+     <div className="modal-header"><div><p className="eyebrow">MEMBER PROFILE</p><h2 id="member-panel-title">{name(registration)}</h2><p>{registration.wwfcTeam || "Team not recorded"} · {String(registration.ageGroup).toUpperCase()}</p><Badge tone={state.tone}>{state.label}</Badge></div><button ref={close} className="modal-close" aria-label="Close member details" onClick={onClose}>×</button></div>
+-    <div className="member-tabs profile-tabs">{[["payments", "Payments"], ["details", "Member details"], ["consent", "Consent & medical"]].map(([key, label]) => <button key={key} aria-pressed={tab === key} className={tab === key ? "is-active" : ""} onClick={() => setTab(key)}>{label}</button>)}</div>
++    <div className="member-tabs profile-tabs">{[["payments", "Payments"], ["details", "Member details"], ["consent", "Consent"]].map(([key, label]) => <button key={key} aria-pressed={tab === key} className={tab === key ? "is-active" : ""} onClick={() => setTab(key)}>{label}</button>)}</div>
+     <div hidden={tab !== "payments"}><PaymentHistory registration={registration} onSessionExpired={onSessionExpired} onBillingChanged={onBillingChanged} onInvoicesSynced={onInvoicesSynced} /></div>
+     {tab === "details" && <><ModalSection title="Player details"><Detail label="Team" value={registration.wwfcTeam} /><Detail label="Age group" value={String(registration.ageGroup).toUpperCase()} /><Detail label="Gender" value={registration.playerSex} /><Detail label="Date of birth" value={date(registration.playerDob)} /><Detail label="Registered" value={date(registration.createdAt)} /><Detail label="Registration reference" value={registration.id} /><Detail label="Email" value={registration.email} /><Detail label="Postcode" value={registration.postcode} /><Detail label="House number" value={registration.houseNumber} /></ModalSection>{[registration.emergencyContact1, registration.emergencyContact2].map((contact, index) => <ModalSection key={index} title={`Parent / emergency contact ${index + 1}`}><Detail label="Name" value={contact?.name} /><Detail label="Relationship" value={contact?.relationship} /><Detail label="Phone" value={contact?.phoneNumber} /><Detail label="Email" value={contact?.email} /><Detail label="Date of birth" value={date(contact?.dob)} /><Detail label="Postcode" value={contact?.postcode} /><Detail label="House number" value={contact?.houseNumber} /></ModalSection>)}
+         {(
+@@ -239,7 +242,7 @@ function MemberPanel({ registration, onClose, onSessionExpired, onBillingChanged
+     )}
+   </>
+ }
+-    {tab === "consent" && <><ModalSection title="Medical information"><Detail label="Medical information" value={registration.medicalInfo} wide /><Detail label="Allergies" value={registration.allergies} wide /></ModalSection><ModalSection title="Permissions"><Detail label="Contact consent" value={registration.consentData ? "Yes" : "No"} /><Detail label="Photo consent" value={registration.consentPhotos ? "Yes" : "No"} /><Detail label="Video consent" value={registration.consentVideos ? "Yes" : "No"} /><Detail label="Walk home alone" value={registration.consentWalkHome == null ? "Not applicable" : registration.consentWalkHome ? "Yes" : "No"} />{registration.acceptedPrivacyPolicy != null && <Detail label="Privacy policy accepted" value={registration.acceptedPrivacyPolicy ? "Yes" : "No"} />}</ModalSection><ModalSection title="Signature"><Detail label="Signed by" value={registration.parentName} /><Detail label="Signature" value={registration.parentSignature} /><Detail label="Signature date" value={date(registration.signatureDate)} /></ModalSection></>}
++    {tab === "consent" && <><ModalSection title="Permissions"><Detail label="Contact consent" value={registration.consentData ? "Yes" : "No"} /><Detail label="Photo consent" value={registration.consentPhotos ? "Yes" : "No"} /><Detail label="Video consent" value={registration.consentVideos ? "Yes" : "No"} /><Detail label="Walk home alone" value={registration.consentWalkHome == null ? "Not applicable" : registration.consentWalkHome ? "Yes" : "No"} />{registration.acceptedPrivacyPolicy != null && <Detail label="Privacy policy accepted" value={registration.acceptedPrivacyPolicy ? "Yes" : "No"} />}</ModalSection><ModalSection title="Signature"><Detail label="Signed by" value={registration.parentName} /><Detail label="Signature" value={registration.parentSignature} /><Detail label="Signature date" value={date(registration.signatureDate)} /></ModalSection></>}
+   </div></div>;
+ }
+ 
+diff --git a/tests/medicalPrivacy.test.cjs b/tests/medicalPrivacy.test.cjs
+new file mode 100644
+index 0000000..65e1d97
+--- /dev/null
++++ b/tests/medicalPrivacy.test.cjs
+@@ -0,0 +1,59 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const vm = require('node:vm');
++const fs = require('node:fs');
++const path = require('node:path');
++const express = require('../backend/node_modules/express');
++const jwt = require('../backend/node_modules/jsonwebtoken');
++const crypto = require('node:crypto');
++const { memberView, memberSelect } = require('../backend/src/services/memberView');
++const source=fs.readFileSync(path.join(__dirname,'../backend/src/routes/admin.js'),'utf8');
++const secret='test-only-bridge-secret-'.repeat(3);
++process.env.TRUDASH_MEMBERSHIP_SHARED_SECRET=secret;
++process.env.TRUDASH_ONLY_ADMIN_AUTH='true';
++const record={id:'member1',createdAt:new Date(),ageGroup:'u13',playerFirstName:'Player',playerSurname:'Example',medicalInfo:'ASTHMA_PRIVATE',allergies:'BEE_PRIVATE',invoices:[]};
++async function fixture(t,{exportAllowed=false,auditFails=false}={}) {
++ const audits=[];let queries=0;
++ const prisma={consentForm:{findMany:async()=>{queries++;return [record];},findUnique:async()=>record},reportExportAudit:{create:async args=>{if(auditFails)throw Error('audit unavailable');audits.push(args.data);}}};
++ const mod={exports:{}};
++ vm.runInNewContext(source,{module:mod,exports:mod.exports,process,console:{error(){}},Buffer,URL,Date,require(name){
++  if(name==='express')return express;
++  if(name==='jsonwebtoken')return jwt;
++  if(name==='csv-writer')return require('../backend/node_modules/csv-writer');
++  if(name==='../prisma')return prisma;
++  if(name==='../services/stripeService')return {createRegistrationCheckout:async()=> 'https://checkout.example',getStripe(){throw Error('not used');}};
++  if(name==='../services/invoiceService')return {};
++  if(name==='../services/memberView')return require('../backend/src/services/memberView');
++  if(name==='../middleware/trudashAdmin')return require('../backend/src/middleware/trudashAdmin');
++  throw Error(name);
++ }});
++ const app=express();app.use(express.json());app.use('/api/admin',mod.exports);
++ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
++ t.after(()=>new Promise(resolve=>server.close(resolve)));
++ async function call(route,{signed=true,method='GET',permission=exportAllowed}={}){
++  const headers={};
++  if(signed)headers['x-trudash-assertion']=jwt.sign({sub:'admin@wwfc.org.uk',role:'membership_admin',fullCsvExport:permission,method,path:'/api/admin'+route,bodyHash:crypto.createHash('sha256').update('null').digest('hex'),jti:crypto.randomUUID()},secret,{algorithm:'HS256',issuer:'trudash',audience:'tcm-membership-admin',expiresIn:30});
++  return fetch(`http://127.0.0.1:${server.address().port}/api/admin${route}`,{method,headers});
++ }
++ return {call,audits,queries:()=>queries};
++}
++test('JSON projection excludes health and unrecognised future properties',()=>{
++ assert.equal(memberSelect.medicalInfo,undefined);assert.equal(memberSelect.allergies,undefined);
++ assert.equal(JSON.stringify(memberView({...record,newHealthField:'secret'})).includes('PRIVATE'),false);
++ assert.equal(memberView({...record,newHealthField:'secret'}).newHealthField,undefined);
++});
++test('members, legacy registrations and resumed setup responses contain no medical values',async t=>{
++ const f=await fixture(t);
++ for(const [route,method] of [['/members','GET'],['/registrations','GET'],['/registrations/member1/payment-setup','POST']]){
++  const r=await f.call(route,{method});assert.equal(r.status,200);const body=await r.text();assert.equal(body.includes('PRIVATE'),false);assert.equal(body.includes('medicalInfo'),false);assert.equal(body.includes('allergies'),false);
++ }
++});
++test('ordinary admins and unsigned requests cannot query or export full records',async t=>{
++ const f=await fixture(t);assert.equal((await f.call('/registrations.csv')).status,403);assert.equal((await f.call('/registrations.csv',{signed:false})).status,401);assert.equal(f.queries(),0);assert.equal(f.audits.length,0);
++});
++test('authorised full CSV retains declarations and records actor without health values',async t=>{
++ const f=await fixture(t,{exportAllowed:true});const r=await f.call('/registrations.csv');assert.equal(r.status,200);assert.equal(r.headers.get('cache-control'),'no-store');const csv=await r.text();assert.ok(csv.includes('ASTHMA_PRIVATE'));assert.ok(csv.includes('BEE_PRIVATE'));assert.equal(f.audits.length,1);assert.equal(f.audits[0].actor,'admin@wwfc.org.uk');assert.equal(f.audits[0].recordCount,1);assert.equal(JSON.stringify(f.audits).includes('PRIVATE'),false);
++});
++test('audit failure prevents release of a full CSV',async t=>{
++ const f=await fixture(t,{exportAllowed:true,auditFails:true});const r=await f.call('/registrations.csv');assert.equal(r.status,500);assert.equal((await r.text()).includes('PRIVATE'),false);
++});

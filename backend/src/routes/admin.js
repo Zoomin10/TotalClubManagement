@@ -8,7 +8,9 @@ const {
   syncMembershipInvoice,
 } = require("../services/invoiceService");
 const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
+const { memberSelect, memberView } = require("../services/memberView");
 const router = express.Router();
+router.use((req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
 
 function requireAdmin(req, res, next) {
   if (req.get("x-trudash-assertion")) {
@@ -121,7 +123,7 @@ router.get("/registrations", requireAdmin, async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
 
-    res.json(registrations);
+    res.json(registrations.map(memberView));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to load registrations" });
@@ -310,6 +312,9 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
 });
 
 router.get("/registrations.csv", requireAdmin, async (req, res) => {
+  if (!req.trudashAdmin?.fullCsvExport) {
+    return res.status(403).json({ error: "Full registration export permission required. Use an authorised Microsoft account through TruDash." });
+  }
   try {
     const forms = await prisma.consentForm.findMany({
       orderBy: { createdAt: "desc" },
@@ -414,6 +419,12 @@ const csv =
     res.header("Content-Type", "text/csv");
 const today = new Date().toLocaleDateString("en-GB").replace(/\//g, "-");
 res.attachment(`wwfc-registrations-${today}.csv`);
+    // Record generation before release. If auditing fails, do not release health data.
+    await prisma.reportExportAudit.create({ data: {
+      actor: req.trudashAdmin.username,
+      report: "FULL_REGISTRATIONS_WITH_MEDICAL",
+      recordCount: forms.length,
+    } });
     res.send(csv);
   } catch (err) {
     console.error(err);
@@ -668,7 +679,7 @@ router.post(
       });
 
       return res.json({
-        registration: updated,
+        registration: memberView(updated),
         message:
           "Membership payments cancelled. Registration and invoices retained.",
       });
@@ -689,7 +700,8 @@ router.get("/members", requireAdmin, async (req, res) => {
   try {
     const registrations = await prisma.consentForm.findMany({
       orderBy: { createdAt: "desc" },
-      include: {
+      select: {
+        ...memberSelect,
         invoices: {
           where: { status: "open" },
           select: {
@@ -707,7 +719,7 @@ router.get("/members", requireAdmin, async (req, res) => {
         );
 
         return {
-          ...registration,
+          ...memberView(registration),
           invoiceSummary: {
             outstandingPence: gbpInvoices.reduce(
               (total, invoice) =>
@@ -722,7 +734,7 @@ router.get("/members", requireAdmin, async (req, res) => {
       }
     );
 
-    res.json({ members });
+    res.json({ members, permissions: { fullCsvExport: req.trudashAdmin?.fullCsvExport === true } });
   } catch (error) {
     console.error("Failed to load members:", error);
 
@@ -743,7 +755,7 @@ router.post("/registrations/:id/payment-setup", requireAdmin, async (req, res) =
     if (!registration) return res.status(404).json({ error: "Member not found" });
     const checkoutUrl = await createRegistrationCheckout(registration);
     const updated = await prisma.consentForm.findUnique({ where: { id: registration.id } });
-    res.json({ checkoutUrl, registration: updated });
+    res.json({ checkoutUrl, registration: memberView(updated) });
   } catch (error) {
     console.error("Resume payment setup failed:", error.message);
     res.status(error.statusCode || 500).json({

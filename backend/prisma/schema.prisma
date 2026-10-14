@@ -147,3 +147,14 @@ model SocialMediaPost {
 
   @@index([createdAt])
 }
+
+// Metadata only; never store exported medical values or the CSV here.
+model ReportExportAudit {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  actor       String
+  report      String
+  recordCount Int
+
+  @@index([createdAt])
+}
