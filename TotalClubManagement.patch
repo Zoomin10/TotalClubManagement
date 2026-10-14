@@ -1,425 +1,126 @@
-diff --git a/backend/prisma/migrations/20261014121000_add_application_permissions/migration.sql b/backend/prisma/migrations/20261014121000_add_application_permissions/migration.sql
-new file mode 100644
-index 0000000..b44a6be
---- /dev/null
-+++ b/backend/prisma/migrations/20261014121000_add_application_permissions/migration.sql
-@@ -0,0 +1,2 @@
-+ALTER TABLE "ClubVolunteer" ADD COLUMN "applicationPermissions" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
-+UPDATE "ClubVolunteer" SET "applicationPermissions" = ARRAY['VOLUNTEERS_MANAGE']::TEXT[] WHERE "accessRole" IN ('ADMIN', 'SUPER_ADMIN');
-diff --git a/backend/prisma/schema.prisma b/backend/prisma/schema.prisma
-index 61d0129..2c2a7a5 100644
---- a/backend/prisma/schema.prisma
-+++ b/backend/prisma/schema.prisma
-@@ -104,6 +104,7 @@ model ClubVolunteer {
-   team                     String?
-   requestedRoles           Json
-   assignedRoles            Json
-+  applicationPermissions   String[]              @default([])
-   accessRole               String                @default("NONE")
-   status                   String                @default("AWAITING_REVIEW")
-   notes                    String                @default("")
-diff --git a/backend/scripts/import-application-permissions.cjs b/backend/scripts/import-application-permissions.cjs
-new file mode 100644
-index 0000000..73db4cc
---- /dev/null
-+++ b/backend/scripts/import-application-permissions.cjs
-@@ -0,0 +1,38 @@
-+require('dotenv').config({quiet:true});
-+const fs=require('node:fs');
-+const volunteers=require('../src/services/volunteerService');
-+const {permissionOptions}=require('../src/services/applicationPermissions');
-+const allowed=new Set(permissionOptions.map(p=>p.key));
-+async function main(){
-+ const file=process.argv[2];if(!file)throw Error('Usage: node scripts/import-application-permissions.cjs reviewed-permissions.json [--apply]');
-+ const input=JSON.parse(fs.readFileSync(file,'utf8'));
-+ if(!Array.isArray(input.grants))throw Error('Expected grants array');
-+ const seen=new Set();
-+ const grants=input.grants.map(g=>{
-+  if(typeof g.email!=='string'||!/^[^\s@]+@[^\s@]+$/.test(g.email)||!Array.isArray(g.permissions)||g.permissions.some(p=>!allowed.has(p)))throw Error('Invalid email or permission');
-+  const email=g.email.trim().toLowerCase();if(seen.has(email))throw Error('Duplicate email');seen.add(email);
-+  return {email,permissions:[...new Set(g.permissions)]};
-+ });
-+ const plan=[];
-+ for(const grant of grants){
-+  const v=await volunteers.prisma.clubVolunteer.findUnique({where:{email:grant.email},include:{acceptances:true}});
-+  const reason=!v?'No volunteer record':v.status!=='ACTIVE'?'Volunteer is not Active':volunteers.currentAcceptances(v).length?'Current agreements required':null;
-+  plan.push({...grant,status:reason?'BLOCKED':'READY',reason});
-+ }
-+ console.log(JSON.stringify({mode:process.argv.includes('--apply')?'apply':'dry-run',plan},null,2));
-+ if(!process.argv.includes('--apply'))return;
-+ if(plan.some(p=>p.status==='BLOCKED'))throw Error('No changes made. Resolve blocked accounts or remove them from the reviewed manifest.');
-+ await volunteers.prisma.$transaction(async tx=>{
-+  for(const grant of grants){
-+   const v=await tx.clubVolunteer.findUnique({where:{email:grant.email},include:{acceptances:true}});
-+   if(!v||v.status!=='ACTIVE'||volunteers.currentAcceptances(v).length)throw Error('Volunteer eligibility changed; no changes committed');
-+   const before=v.applicationPermissions||[];
-+   const after=[...new Set([...before,...grant.permissions])];
-+   if([...before].sort().join('|')===[...after].sort().join('|'))continue;
-+   await tx.clubVolunteer.update({where:{id:v.id},data:{applicationPermissions:after}});
-+   await tx.volunteerChange.create({data:{volunteerId:v.id,actor:'reviewed-legacy-permission-import',action:'PERMISSIONS_IMPORTED',details:{before,after}}});
-+  }
-+ },{isolationLevel:'Serializable',timeout:60000});
-+ console.log('Reviewed permission grants imported. No Super Admin permissions were granted.');
-+}
-+main().catch(e=>{console.error(e.message);process.exitCode=1;}).finally(()=>volunteers.prisma.$disconnect());
-diff --git a/backend/src/app.js b/backend/src/app.js
-index 5adc0ba..89b12a8 100644
---- a/backend/src/app.js
-+++ b/backend/src/app.js
-@@ -40,6 +40,7 @@ app.use(cookieParser());
- app.use("/api/social-media/admin", require("./routes/socialMedia"));
- app.use("/api/volunteers", require("./routes/volunteers"));
- app.use("/api/consent", consentRoutes);
-+app.use("/api/access", require("./routes/applicationAccess"));
- app.use("/api/admin", adminRoutes);
- 
- app.get("/api/health", (req, res) => {
-diff --git a/backend/src/middleware/trudashAdmin.js b/backend/src/middleware/trudashAdmin.js
-index f32335a..7a00cc3 100644
---- a/backend/src/middleware/trudashAdmin.js
-+++ b/backend/src/middleware/trudashAdmin.js
-@@ -13,7 +13,7 @@ function verifyTrudashAdmin(req, res) {
-       algorithms: ["HS256"], issuer: "trudash", audience: "tcm-membership-admin",
-       maxAge: "30s", clockTolerance: 2,
-     });
--    const expectedScope = req.originalUrl.startsWith("/api/volunteers/admin") ? "volunteers"
-+    const expectedScope = req.originalUrl.startsWith("/api/access/") ? "access" : req.originalUrl.startsWith("/api/volunteers/admin") ? "volunteers"
-       : req.originalUrl.startsWith("/api/social-media/admin") ? "social" : "members";
-     if (claims.scope !== expectedScope) throw new Error("Wrong permission scope");
-     const hash = crypto.createHash("sha256").update(JSON.stringify(req.body || null)).digest("hex");
 diff --git a/backend/src/routes/admin.js b/backend/src/routes/admin.js
-index ee31652..cb08c9c 100644
+index cb08c9c..0577754 100644
 --- a/backend/src/routes/admin.js
 +++ b/backend/src/routes/admin.js
-@@ -1,5 +1,4 @@
- const express = require("express");
--const jwt = require("jsonwebtoken");
- const { createObjectCsvStringifier } = require("csv-writer");
- 
- const prisma = require("../prisma");
-@@ -12,62 +11,24 @@ const { memberSelect, memberView } = require("../services/memberView");
- const router = express.Router();
- router.use((req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
- 
--function requireAdmin(req, res, next) {
-+async function requireAdmin(req, res, next) {
-   if (req.get("x-trudash-assertion")) {
--    if (verifyTrudashAdmin(req, res)) return next();
-+    if (verifyTrudashAdmin(req, res)) {
-+      try {
-+        const access = await require("../services/applicationPermissions").applicationAccess(req.trudashAdmin);
-+        if (!access.permissions.includes("MEMBERS_MANAGE")) return res.status(403).json({error:"Membership administrator access required"});
-+        req.trudashAdmin.fullCsvExport = access.permissions.includes("FULL_CSV_EXPORT");
-+        return next();
-+      } catch { return res.status(503).json({error:"Membership permissions could not be checked"}); }
-+    }
-     return;
+@@ -18,6 +18,7 @@ async function requireAdmin(req, res, next) {
+         const access = await require("../services/applicationPermissions").applicationAccess(req.trudashAdmin);
+         if (!access.permissions.includes("MEMBERS_MANAGE")) return res.status(403).json({error:"Membership administrator access required"});
+         req.trudashAdmin.fullCsvExport = access.permissions.includes("FULL_CSV_EXPORT");
++        req.applicationAccess = access;
+         return next();
+       } catch { return res.status(503).json({error:"Membership permissions could not be checked"}); }
+     }
+@@ -658,6 +659,11 @@ router.post(
+     }
    }
--  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
--    return res.status(401).json({ error: "Sign in through TruDash" });
--  }
--  const token = req.cookies?.admin_token;
--
--  if (!token) {
--    return res.status(401).json({ error: "Admin login required" });
--  }
--
--  try {
--    const claims = jwt.verify(token, process.env.JWT_SECRET);
--    if (claims.role !== "admin") throw new Error("Admin role required");
--    next();
--  } catch (err) {
--    return res.status(401).json({ error: "Invalid or expired admin session" });
--  }
-+  return res.status(401).json({error:"Sign in through TruDash"});
- }
- 
-+// Shared-password access cannot identify the user for application permissions.
- router.post("/login", (req, res) => {
--  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
--    return res.status(403).json({ error: "Use Microsoft sign-in through TruDash" });
--  }
--  try {
--    const { password } = req.body;
--
--    if (!process.env.ADMIN_PASSWORD || !process.env.JWT_SECRET) {
--      return res.status(500).json({ error: "Admin auth is not configured" });
--    }
--
--    if (password !== process.env.ADMIN_PASSWORD) {
--      return res.status(401).json({ error: "Incorrect password" });
--    }
--
--    const token = jwt.sign(
--      { role: "admin" },
--      process.env.JWT_SECRET,
--      { expiresIn: "8h" }
--    );
--
--    res.cookie("admin_token", token, {
--      httpOnly: true,
--      secure: true,
--      sameSite: "none",
--      maxAge: 8 * 60 * 60 * 1000,
--    });
--
--    res.json({ success: true });
--  } catch (err) {
--    console.error("Admin login error:", err);
--    res.status(500).json({ error: "Admin login failed" });
--  }
-+  res.status(403).json({error:"Use Microsoft sign-in through TruDash"});
- });
- 
- router.post("/logout", (req, res) => {
-diff --git a/backend/src/routes/applicationAccess.js b/backend/src/routes/applicationAccess.js
-new file mode 100644
-index 0000000..26a3c32
---- /dev/null
-+++ b/backend/src/routes/applicationAccess.js
-@@ -0,0 +1,12 @@
-+const express = require('express');
-+const {verifyTrudashAdmin} = require('../middleware/trudashAdmin');
-+const {applicationAccess} = require('../services/applicationPermissions');
-+const router=express.Router();
-+router.get('/me', async(req,res)=>{
-+ res.set('Cache-Control','no-store');
-+ if(!req.get('x-trudash-assertion'))return res.status(401).json({error:'Microsoft sign-in through TruDash required'});
-+ if(!verifyTrudashAdmin(req,res))return;
-+ try{res.json(await applicationAccess(req.trudashAdmin));}
-+ catch{res.status(503).json({error:'Application permissions could not be checked'});}
+ );
++router.get("/retention-review", requireAdmin, async(req,res)=>{
++  if(req.applicationAccess?.superAdmin !== true)return res.status(403).json({error:"Super Admin and membership management access required"});
++  try { res.json(await require("../services/retentionReview").retentionReview(prisma)); }
++  catch { res.status(500).json({error:"Retention review could not be generated"}); }
 +});
-+module.exports=router;
-diff --git a/backend/src/routes/socialMedia.js b/backend/src/routes/socialMedia.js
-index 335d330..1b94d1b 100644
---- a/backend/src/routes/socialMedia.js
-+++ b/backend/src/routes/socialMedia.js
-@@ -4,10 +4,15 @@ const prisma = require("../prisma");
- const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
- const { normalisePostUrl } = require("../services/socialMediaService");
- const router = express.Router();
--router.use((req, res, next) => {
-+router.use(async (req, res, next) => {
-   res.set("Cache-Control", "no-store");
-   if (!req.get("x-trudash-assertion")) return res.status(401).json({ error: "Sign in through TruDash" });
--  if (verifyTrudashAdmin(req, res)) next();
-+  if (!verifyTrudashAdmin(req, res)) return;
-+  try {
-+    const access = await require("../services/applicationPermissions").applicationAccess(req.trudashAdmin);
-+    if (!access.permissions.includes("MEMBERS_MANAGE")) return res.status(403).json({error:"Social media administration access required"});
-+    next();
-+  } catch { res.status(503).json({error:"Application permissions could not be checked"}); }
- });
- router.get("/", async (req, res) => {
+ router.get("/members", requireAdmin, async (req, res) => {
    try {
-diff --git a/backend/src/routes/volunteers.js b/backend/src/routes/volunteers.js
-index 8e281b3..8c50a90 100644
---- a/backend/src/routes/volunteers.js
-+++ b/backend/src/routes/volunteers.js
-@@ -2,6 +2,7 @@ const express = require("express");
- const crypto = require("crypto");
- const service = require("../services/volunteerService");
- const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
-+const { applicationAccess, permissionOptions } = require("../services/applicationPermissions");
- const router = express.Router();
- const include = { acceptances: true };
- // Bound anonymous submission frequency. Reverse-proxy IPs are deliberately not trusted.
-@@ -60,11 +61,8 @@ router.post("/accept/:token", rateLimit, async (req, res) => {
- // Every volunteer request rechecks current access; sign-in and member privileges
- // do not grant volunteer administration. Bootstrap users recover initial access.
- async function volunteerAccess(identity, db = service.prisma) {
--  if (identity.volunteerSuperAdmin) return { available: true, superAdmin: true };
--  const actor = await db.clubVolunteer.findUnique({ where: { email: identity.username }, include });
--  const available = Boolean(actor && actor.status === "ACTIVE" &&
--    ["ADMIN", "SUPER_ADMIN"].includes(actor.accessRole) && !service.currentAcceptances(actor).length);
--  return { available, superAdmin: available && actor.accessRole === "SUPER_ADMIN" };
-+  const access = await applicationAccess(identity, db);
-+  return {available:access.permissions.includes("VOLUNTEERS_MANAGE"),superAdmin:access.superAdmin};
- }
- router.use("/admin", async (req, res, next) => {
-   res.set("Cache-Control", "no-store");
-@@ -82,7 +80,7 @@ router.get("/admin", async (req, res) => {
-   try {
-     const volunteers = await service.prisma.clubVolunteer.findMany({ include, orderBy: { createdAt: "desc" } });
-     const superAdmin = req.volunteerAccess.superAdmin;
--    res.json({ volunteers: volunteers.map(service.summary), roles: service.roles, superAdmin: Boolean(superAdmin) });
-+    res.json({ volunteers: volunteers.map(service.summary), roles: service.roles, superAdmin: Boolean(superAdmin), permissionOptions });
-   } catch { res.status(500).json({ error: "Volunteers could not be loaded." }); }
- });
- router.patch("/admin/:id", async (req, res) => {
-@@ -95,13 +93,16 @@ router.patch("/admin/:id", async (req, res) => {
-       const access = await volunteerAccess(req.trudashAdmin, tx);
-       if (!access.available) throw Object.assign(new Error("Volunteer administrator access required"), { statusCode: 403 });
-       const superAdmin = access.superAdmin;
--      if ((parsed.data.accessRole !== v.accessRole || v.accessRole === "SUPER_ADMIN") && !superAdmin) throw Object.assign(new Error("Super Admin access is required to change this record or access permissions."), { statusCode: 403 });
-+      const permissionChanges = parsed.data.applicationPermissions !== undefined &&
-+        [...parsed.data.applicationPermissions].sort().join("|") !== [...(v.applicationPermissions || [])].sort().join("|");
-+      if (permissionChanges && !superAdmin) throw Object.assign(new Error("Super Admin access is required to change application permissions."), {statusCode:403});
-+      if ((parsed.data.accessRole !== v.accessRole || v.accessRole === "SUPER_ADMIN" || (v.applicationPermissions || []).length > 0) && !superAdmin) throw Object.assign(new Error("Super Admin access is required to change this record or access permissions."), { statusCode: 403 });
-       if (v.updatedAt.toISOString() !== parsed.data.updatedAt) throw Object.assign(new Error("This record has changed. Refresh before saving."), { statusCode: 409 });
-       const { updatedAt, ...changes } = parsed.data;
-       if (changes.status === "ACTIVE" && !changes.assignedRoles.length) throw Object.assign(new Error("Assign at least one club role before activation."), { statusCode: 409 });
-       const updated = await tx.clubVolunteer.update({ where: { id: v.id }, data: changes, include });
-       if (updated.status === "ACTIVE" && service.currentAcceptances(updated).length) throw Object.assign(new Error("Required agreements must be accepted before activation."), { statusCode: 409 });
--      await tx.volunteerChange.create({ data: { volunteerId: v.id, actor: req.trudashAdmin.username, action: "UPDATED", details: { before: { assignedRoles: v.assignedRoles, accessRole: v.accessRole, status: v.status, notes: v.notes }, after: parsed.data } } });
-+      await tx.volunteerChange.create({ data: { volunteerId: v.id, actor: req.trudashAdmin.username, action: "UPDATED", details: { before: { applicationPermissions: v.applicationPermissions || [], assignedRoles: v.assignedRoles, accessRole: v.accessRole, status: v.status, notes: v.notes }, after: parsed.data } } });
-       return service.summary(updated);
-     }, { isolationLevel: "Serializable" });
-     res.json(result);
-@@ -116,7 +117,7 @@ router.post("/admin/:id/acceptance-link", async (req, res) => {
-       const v = await tx.clubVolunteer.findUnique({ where: { id: req.params.id } });
-       if (!v) throw Object.assign(new Error("Volunteer not found."), { statusCode: 404 });
-       const access = await volunteerAccess(req.trudashAdmin, tx);
--      if (!access.available || (v.accessRole === "SUPER_ADMIN" && !access.superAdmin)) throw Object.assign(new Error("Volunteer administrator permission required for this record."), { statusCode: 403 });
-+      if (!access.available || ((v.accessRole === "SUPER_ADMIN" || (v.applicationPermissions || []).length > 0) && !access.superAdmin)) throw Object.assign(new Error("Volunteer administrator permission required for this record."), { statusCode: 403 });
-       await tx.clubVolunteer.update({ where: { id: v.id }, data: { acceptanceTokenHash: service.hashToken(token), acceptanceTokenExpiresAt: new Date(Date.now() + 30 * 86400000) } });
-       await tx.volunteerChange.create({ data: { volunteerId: v.id, actor: req.trudashAdmin.username, action: "ACCEPTANCE_LINK_CREATED", details: {} } });
-     });
-diff --git a/backend/src/services/applicationPermissions.js b/backend/src/services/applicationPermissions.js
+     const registrations = await prisma.consentForm.findMany({
+diff --git a/backend/src/services/retentionReview.js b/backend/src/services/retentionReview.js
 new file mode 100644
-index 0000000..d3f59d7
+index 0000000..f1318af
 --- /dev/null
-+++ b/backend/src/services/applicationPermissions.js
-@@ -0,0 +1,20 @@
-+const volunteers = require('./volunteerService');
-+const permissionOptions = [
-+  {key:'MEMBERS_MANAGE',label:'Manage member registrations and payments'},
-+  {key:'VOLUNTEERS_MANAGE',label:'Manage volunteer records'},
-+  {key:'FINANCE_DETAILS',label:'View named payment and arrears details'},
-+  {key:'WELFARE_DETAILS',label:'View individual welfare and complaint records'},
-+  {key:'SOURCE_REPORTS',label:'View source report links'},
-+  {key:'FULL_CSV_EXPORT',label:'Download full member CSV including medical declarations'},
-+];
-+async function applicationAccess(identity, db = volunteers.prisma) {
-+  const bootstrap = identity.volunteerSuperAdmin === true;
-+  const actor = await db.clubVolunteer.findUnique({where:{email:identity.username},include:{acceptances:true}});
-+  if (!actor || actor.status !== 'ACTIVE' || volunteers.currentAcceptances(actor).length) return bootstrap ? {permissions:['VOLUNTEERS_MANAGE'],superAdmin:true} : {permissions:[],superAdmin:false};
-+  const allowed = new Set(permissionOptions.map(p=>p.key));
-+  const permissions = [...new Set((actor.applicationPermissions || []).filter(p=>allowed.has(p)))];
-+  const superAdmin = bootstrap || actor.accessRole === 'SUPER_ADMIN';
-+  if (superAdmin && !permissions.includes('VOLUNTEERS_MANAGE')) permissions.push('VOLUNTEERS_MANAGE');
-+  return {permissions,superAdmin};
++++ b/backend/src/services/retentionReview.js
+@@ -0,0 +1,38 @@
++const {DateTime}=require('luxon');
++const zone='Europe/London';
++function reviewRecord(record,now=new Date()){
++ const registered=DateTime.fromJSDate(new Date(record.createdAt),{zone});
++ const today=DateTime.fromJSDate(new Date(now),{zone});
++ const valid=registered.isValid&&registered.toMillis()<=today.toMillis();
++ const startYear=valid?(registered.month>=6?registered.year:registered.year-1):null;
++ const end=valid?DateTime.fromObject({year:startYear+1,month:5,day:31},{zone}).endOf('day'):null;
++ const proposedReview=end?.plus({years:1});
++ const state=!valid?'CHECK_REGISTRATION_DATE':today.toMillis()<=end.toMillis()?'CURRENT_INFERRED_SEASON':today.toMillis()<=proposedReview.toMillis()?'REVIEW_RENEWAL':'REVIEW_OLD_REGISTRATION';
++ return {
++  id:record.id,playerFirstName:record.playerFirstName,playerSurname:record.playerSurname,
++  team:record.wwfcTeam||null,registeredAt:record.createdAt,
++  inferredSeason:startYear===null?null:`${startYear}/${String(startYear+1).slice(-2)}`,
++  seasonEnd:end?.toISODate()||null,
++  proposedArchiveReviewDate:proposedReview?.toISODate()||null,
++  state,seasonBasis:'REGISTRATION_DATE_ONLY',renewalStatus:'UNCONFIRMED',
++  billingReviewRequired:Boolean(record.stripeScheduleId||record.stripeSubscriptionId||record.stripeSubscriptionStatus),
++  openInvoiceCount:record._count?.invoices||0,
++  deletionEligible:false,
++ };
 +}
-+module.exports = {applicationAccess,permissionOptions};
-diff --git a/backend/src/services/volunteerService.js b/backend/src/services/volunteerService.js
-index 7e12565..9ca7103 100644
---- a/backend/src/services/volunteerService.js
-+++ b/backend/src/services/volunteerService.js
-@@ -48,6 +48,7 @@ const signupSchema = z.object({
-   phone: z.string().trim().min(7).max(30).regex(/^[+\d\s()-]+$/), team: z.string().trim().max(100).default(""),
-   requestedRoles: roleSchema.min(1), acceptances: z.record(z.string(), z.string()),
- });
--const updateSchema = z.object({ updatedAt: z.string().datetime(), assignedRoles: roleSchema, status: z.enum(["AWAITING_REVIEW", "ACTIVE", "INACTIVE"]), notes: z.string().trim().max(4000), accessRole: z.enum(["NONE", "ADMIN", "SUPER_ADMIN"]) });
-+const applicationPermissionKeys = ["MEMBERS_MANAGE", "VOLUNTEERS_MANAGE", "FINANCE_DETAILS", "WELFARE_DETAILS", "SOURCE_REPORTS", "FULL_CSV_EXPORT"];
-+const updateSchema = z.object({ applicationPermissions: z.array(z.enum(applicationPermissionKeys)).max(applicationPermissionKeys.length).refine(p => new Set(p).size === p.length, "Duplicate permissions").optional(), updatedAt: z.string().datetime(), assignedRoles: roleSchema, status: z.enum(["AWAITING_REVIEW", "ACTIVE", "INACTIVE"]), notes: z.string().trim().max(4000), accessRole: z.enum(["NONE", "ADMIN", "SUPER_ADMIN"]) });
- const hashToken = token => crypto.createHash("sha256").update(token).digest("hex");
- module.exports = { roles, footballRoles, agreements, required, currentAcceptances, summary, acceptanceData, signupSchema, updateSchema, hashToken, prisma };
-diff --git a/tests/applicationPermissions.test.cjs b/tests/applicationPermissions.test.cjs
++async function retentionReview(prisma,now=new Date()){
++ const records=await prisma.consentForm.findMany({
++  select:{id:true,createdAt:true,playerFirstName:true,playerSurname:true,wwfcTeam:true,
++   stripeScheduleId:true,stripeSubscriptionId:true,stripeSubscriptionStatus:true,
++   _count:{select:{invoices:{where:{status:'open',amountRemainingPence:{gt:0}}}}}},
++  orderBy:{createdAt:'asc'},
++ });
++ const members=records.map(record=>reviewRecord(record,now));
++ const counts={total:members.length,currentInferredSeason:0,reviewRenewal:0,reviewOldRegistration:0,checkRegistrationDate:0};
++ for(const member of members){const key={CURRENT_INFERRED_SEASON:'currentInferredSeason',REVIEW_RENEWAL:'reviewRenewal',REVIEW_OLD_REGISTRATION:'reviewOldRegistration',CHECK_REGISTRATION_DATE:'checkRegistrationDate'}[member.state];counts[key]++;}
++ return {generatedAt:new Date(now).toISOString(),timeZone:zone,seasonEnd:'31 May',proposedArchiveMonths:12,
++  destructiveActionsEnabled:false,
++  notice:'Read-only review. Seasons are inferred from registration dates. Renewal, departure, archive dates and record holds are not recorded. Confirm these separately before deciding what to retain or remove. The 12-month archive period is a proposal.',
++  counts,members};
++}
++module.exports={reviewRecord,retentionReview};
+diff --git a/tests/retentionReview.test.cjs b/tests/retentionReview.test.cjs
 new file mode 100644
-index 0000000..e9f60f7
+index 0000000..b409a0a
 --- /dev/null
-+++ b/tests/applicationPermissions.test.cjs
-@@ -0,0 +1,32 @@
-+const test=require('node:test');const assert=require('node:assert/strict');const vm=require('node:vm');const fs=require('node:fs');const path=require('node:path');
-+const source=fs.readFileSync(path.join(__dirname,'../backend/src/services/applicationPermissions.js'),'utf8');
-+function access(record){const mod={exports:{}};vm.runInNewContext(source,{module:mod,require:()=>({prisma:{clubVolunteer:{findUnique:async()=>record}},currentAcceptances:v=>v.missing||[]})});return mod.exports.applicationAccess;}
-+test('active accepted permissions are explicit, filtered and independent of club titles',async()=>{
-+ const read=access({status:'ACTIVE',accessRole:'NONE',assignedRoles:['Trustee','Treasurer'],applicationPermissions:['FINANCE_DETAILS','FULL_CSV_EXPORT','UNKNOWN']});
-+ const out=await read({username:'person@wwfc.org.uk'});assert.deepEqual(Array.from(out.permissions),['FINANCE_DETAILS','FULL_CSV_EXPORT']);assert.equal(out.superAdmin,false);
-+ const none=await access({status:'ACTIVE',accessRole:'ADMIN',applicationPermissions:[]})({username:'x'});assert.equal(none.permissions.length,0);
++++ b/tests/retentionReview.test.cjs
+@@ -0,0 +1,52 @@
++const test=require('node:test');const assert=require('node:assert/strict');
++const {reviewRecord,retentionReview}=require('../backend/src/services/retentionReview');
++const seed={id:'m1',createdAt:new Date('2026-10-14T10:00:00Z'),playerFirstName:'Example',playerSurname:'Player',wwfcTeam:'U13',medicalInfo:'HEALTH_PRIVATE',allergies:'ALLERGY_PRIVATE',email:'CONTACT_PRIVATE',playerDob:'2013-01-01',stripeSubscriptionId:'sub_private',_count:{invoices:2}};
++test('October registration maps to the following May with a proposed 12-month review',()=>{
++ const row=reviewRecord(seed,new Date('2026-10-14T12:00:00Z'));assert.equal(row.inferredSeason,'2026/27');assert.equal(row.seasonEnd,'2027-05-31');assert.equal(row.proposedArchiveReviewDate,'2028-05-31');assert.equal(row.state,'CURRENT_INFERRED_SEASON');assert.equal(row.deletionEligible,false);assert.equal(row.renewalStatus,'UNCONFIRMED');
 +});
-+test('bootstrap recovers volunteer management but does not implicitly grant finance or CSV',async()=>{
-+ for(const record of [null,{status:'INACTIVE',accessRole:'SUPER_ADMIN',applicationPermissions:['FULL_CSV_EXPORT']},{status:'ACTIVE',missing:['VOLUNTEER'],applicationPermissions:['FINANCE_DETAILS']}]){
-+ const result=await access(record)({username:'recovery',volunteerSuperAdmin:true});assert.deepEqual(Array.from(result.permissions),['VOLUNTEERS_MANAGE']);assert.equal(result.superAdmin,true);
++test('season boundaries use London dates including summer time',()=>{
++ const before=reviewRecord({...seed,createdAt:new Date('2026-05-31T22:59:59.999Z')},new Date('2026-06-01T12:00:00Z'));
++ const after=reviewRecord({...seed,createdAt:new Date('2026-05-31T23:00:00Z')},new Date('2026-06-01T12:00:00Z'));
++ assert.equal(before.inferredSeason,'2025/26');assert.equal(after.inferredSeason,'2026/27');
++ assert.equal(reviewRecord(seed,new Date('2027-05-31T22:59:59.999Z')).state,'CURRENT_INFERRED_SEASON');
++ assert.equal(reviewRecord(seed,new Date('2027-05-31T23:00:00Z')).state,'REVIEW_RENEWAL');
++ assert.equal(reviewRecord(seed,new Date('2028-05-31T23:00:00Z')).state,'REVIEW_OLD_REGISTRATION');
++});
++test('old, future or invalid registrations never become deletion eligible',()=>{
++ for(const createdAt of ['2020-01-01','2030-01-01','not-a-date']){
++ const row=reviewRecord({...seed,createdAt},new Date('2026-10-14'));assert.equal(row.deletionEligible,false);assert.equal(row.renewalStatus,'UNCONFIRMED');
++ if(createdAt!=='2020-01-01')assert.equal(row.state,'CHECK_REGISTRATION_DATE');
 + }
-+ const valid=await access({status:'ACTIVE',accessRole:'NONE',applicationPermissions:['MEMBERS_MANAGE']})({username:'recovery',volunteerSuperAdmin:true});assert.ok(valid.permissions.includes('MEMBERS_MANAGE'));assert.ok(valid.permissions.includes('VOLUNTEERS_MANAGE'));
 +});
-+test('inactive or unaccepted saved Super Admin cannot use assigned permissions',async()=>{
-+ for(const record of [{status:'INACTIVE',accessRole:'SUPER_ADMIN',applicationPermissions:['MEMBERS_MANAGE']},{status:'ACTIVE',missing:['COACH'],accessRole:'SUPER_ADMIN',applicationPermissions:['FINANCE_DETAILS']}])assert.equal((await access(record)({username:'x'})).permissions.length,0);
++test('report explicitly selects minimal fields and never returns health, contact or Stripe identifiers',async()=>{
++ let calls=0;const prisma={consentForm:{findMany:async args=>{calls++;assert.equal(args.select.medicalInfo,undefined);assert.equal(args.select.email,undefined);return [seed];}}};
++ const report=await retentionReview(prisma,new Date('2026-10-14T12:00:00Z'));assert.equal(calls,1);assert.equal(report.destructiveActionsEnabled,false);assert.equal(report.counts.currentInferredSeason,1);assert.equal(report.members[0].billingReviewRequired,true);assert.equal(report.members[0].openInvoiceCount,2);
++ const json=JSON.stringify(report);assert.equal(json.includes('PRIVATE'),false);assert.equal(json.includes('sub_private'),false);assert.equal(json.includes('medicalInfo'),false);
 +});
-+const importer=fs.readFileSync(path.join(__dirname,'../backend/scripts/import-application-permissions.cjs'),'utf8');
-+async function runImport({apply=false,eligible=true}={}){
-+ const updates=[],audits=[],errors=[];let disconnected;
-+ const finished=new Promise(resolve=>disconnected=resolve);
-+ const record={id:'v1',status:eligible?'ACTIVE':'INACTIVE',applicationPermissions:[],acceptances:[]};
-+ const db={clubVolunteer:{findUnique:async()=>record,update:async x=>updates.push(x)},volunteerChange:{create:async x=>audits.push(x)},$disconnect:async()=>disconnected()};db.$transaction=async fn=>fn(db);
-+ const processStub={argv:['node','script','manifest.json',...(apply?['--apply']:[])],exitCode:0};
-+ vm.runInNewContext(importer,{require:name=>name==='dotenv'?{config(){}}:name==='node:fs'?{readFileSync:()=>JSON.stringify({grants:[{email:'person@wwfc.org.uk',permissions:['FINANCE_DETAILS']}]})}:name.includes('volunteerService')?{prisma:db,currentAcceptances:()=>[]}: {permissionOptions:[{key:'FINANCE_DETAILS'}]},process:processStub,console:{log(){},error:x=>errors.push(x)}});
-+ await finished;return {updates,audits,errors,code:processStub.exitCode};
-+}
-+test('legacy importer is read-only by default and audits explicit apply',async()=>{
-+ const dry=await runImport();assert.equal(dry.updates.length,0);assert.equal(dry.audits.length,0);
-+ const applied=await runImport({apply:true});assert.equal(applied.updates.length,1);assert.equal(applied.audits[0].data.action,'PERMISSIONS_IMPORTED');assert.equal(applied.code,0);
-+ const blocked=await runImport({apply:true,eligible:false});assert.equal(blocked.updates.length,0);assert.equal(blocked.code,1);
-+});
-diff --git a/tests/medicalPrivacy.test.cjs b/tests/medicalPrivacy.test.cjs
-new file mode 100644
-index 0000000..60c8f8a
---- /dev/null
-+++ b/tests/medicalPrivacy.test.cjs
-@@ -0,0 +1,65 @@
-+const test = require('node:test');
-+const assert = require('node:assert/strict');
-+const vm = require('node:vm');
-+const fs = require('node:fs');
-+const path = require('node:path');
-+const express = require('../backend/node_modules/express');
-+const jwt = require('../backend/node_modules/jsonwebtoken');
-+const crypto = require('node:crypto');
-+const { memberView, memberSelect } = require('../backend/src/services/memberView');
-+const source=fs.readFileSync(path.join(__dirname,'../backend/src/routes/admin.js'),'utf8');
-+const secret='test-only-bridge-secret-'.repeat(3);
-+process.env.TRUDASH_MEMBERSHIP_SHARED_SECRET=secret;
-+process.env.TRUDASH_ONLY_ADMIN_AUTH='true';
-+const record={id:'member1',createdAt:new Date(),ageGroup:'u13',playerFirstName:'Player',playerSurname:'Example',medicalInfo:'ASTHMA_PRIVATE',allergies:'BEE_PRIVATE',invoices:[]};
-+async function fixture(t,{exportAllowed=false,auditFails=false}={}) {
-+ const audits=[];let queries=0;
-+ const prisma={consentForm:{findMany:async()=>{queries++;return [record];},findUnique:async()=>record},reportExportAudit:{create:async args=>{if(auditFails)throw Error('audit unavailable');audits.push(args.data);}}};
++const vm=require('node:vm'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
++const express=require('../backend/node_modules/express'),jwt=require('../backend/node_modules/jsonwebtoken');
++const secret='retention-test-only-secret-'.repeat(3);process.env.TRUDASH_MEMBERSHIP_SHARED_SECRET=secret;
++async function fixture(t){
++ let reads=0;const prisma={consentForm:{findMany:async()=>{reads++;return [seed];}}};
 + const mod={exports:{}};
-+ vm.runInNewContext(source,{module:mod,exports:mod.exports,process,console:{error(){}},Buffer,URL,Date,require(name){
-+  if(name==='express')return express;
-+  if(name==='jsonwebtoken')return jwt;
-+  if(name==='csv-writer')return require('../backend/node_modules/csv-writer');
-+  if(name==='../prisma')return prisma;
-+  if(name==='../services/stripeService')return {createRegistrationCheckout:async()=> 'https://checkout.example',getStripe(){throw Error('not used');}};
-+  if(name==='../services/invoiceService')return {};
-+  if(name==='../services/applicationPermissions')return {applicationAccess:async()=>({permissions:['MEMBERS_MANAGE',...(exportAllowed?['FULL_CSV_EXPORT']:[])]})};
-+  if(name==='../services/memberView')return require('../backend/src/services/memberView');
-+  if(name==='../middleware/trudashAdmin')return require('../backend/src/middleware/trudashAdmin');
-+  throw Error(name);
++ vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../backend/src/routes/admin.js'),'utf8'),{module:mod,process,console:{error(){}},URL,Buffer,Date,require(name){
++ if(name==='express')return express;if(name==='csv-writer')return require('../backend/node_modules/csv-writer');if(name==='../prisma')return prisma;
++ if(name==='../services/applicationPermissions')return {applicationAccess:async identity=>({permissions:identity.username!=='superonly@wwfc.org.uk'?['MEMBERS_MANAGE']:[],superAdmin:['chair@wwfc.org.uk','superonly@wwfc.org.uk'].includes(identity.username)})};
++ if(name==='../services/retentionReview')return {retentionReview};
++ if(name==='../middleware/trudashAdmin')return require('../backend/src/middleware/trudashAdmin');
++ if(name==='../services/memberView')return require('../backend/src/services/memberView');return {};
 + }});
-+ const app=express();app.use(express.json());app.use(require('../backend/node_modules/cookie-parser')());app.use('/api/admin',mod.exports);
-+ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
-+ t.after(()=>new Promise(resolve=>server.close(resolve)));
-+ async function call(route,{signed=true,method='GET',permission=exportAllowed,legacyCookie=false}={}){
-+  const headers={};if(legacyCookie)headers.Cookie='admin_token='+jwt.sign({role:'admin'},'legacy-test-secret');
-+  if(signed)headers['x-trudash-assertion']=jwt.sign({sub:'admin@wwfc.org.uk',role:'membership_admin',scope:'members',fullCsvExport:permission,method,path:'/api/admin'+route,bodyHash:crypto.createHash('sha256').update('null').digest('hex'),jti:crypto.randomUUID()},secret,{algorithm:'HS256',issuer:'trudash',audience:'tcm-membership-admin',expiresIn:30});
-+  return fetch(`http://127.0.0.1:${server.address().port}/api/admin${route}`,{method,headers});
++ const app=express();app.use(express.json());app.use('/api/admin',mod.exports);
++ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
++ async function call(username,method='GET'){
++ const route='/api/admin/retention-review';const headers={};if(username)headers['x-trudash-assertion']=jwt.sign({sub:username,role:'membership_admin',scope:'members',method,path:route,bodyHash:crypto.createHash('sha256').update('null').digest('hex'),jti:crypto.randomUUID()},secret,{issuer:'trudash',audience:'tcm-membership-admin',expiresIn:30});
++ return fetch(`http://127.0.0.1:${server.address().port}${route}`,{method,headers});
 + }
-+ return {call,audits,queries:()=>queries};
++ return {call,reads:()=>reads};
 +}
-+test('JSON projection excludes health and unrecognised future properties',()=>{
-+ assert.equal(memberSelect.medicalInfo,undefined);assert.equal(memberSelect.allergies,undefined);
-+ assert.equal(JSON.stringify(memberView({...record,newHealthField:'secret'})).includes('PRIVATE'),false);
-+ assert.equal(memberView({...record,newHealthField:'secret'}).newHealthField,undefined);
++test('ordinary member administrators and Super Admin without membership permission cannot query the report',async t=>{
++ const f=await fixture(t);assert.equal((await f.call()).status,401);assert.equal((await f.call('memberadmin@wwfc.org.uk')).status,403);assert.equal((await f.call('superonly@wwfc.org.uk')).status,403);assert.equal(f.reads(),0);
 +});
-+test('members, legacy registrations and resumed setup responses contain no medical values',async t=>{
-+ const f=await fixture(t);
-+ for(const [route,method] of [['/members','GET'],['/registrations','GET'],['/registrations/member1/payment-setup','POST']]){
-+  const r=await f.call(route,{method});assert.equal(r.status,200);const body=await r.text();assert.equal(body.includes('PRIVATE'),false);assert.equal(body.includes('medicalInfo'),false);assert.equal(body.includes('allergies'),false);
-+ }
-+});
-+test('ordinary admins and unsigned requests cannot query or export full records',async t=>{
-+ const f=await fixture(t);assert.equal((await f.call('/registrations.csv')).status,403);assert.equal((await f.call('/registrations.csv',{signed:false})).status,401);assert.equal(f.queries(),0);assert.equal(f.audits.length,0);
-+});
-+test('authorised full CSV retains declarations and records actor without health values',async t=>{
-+ const f=await fixture(t,{exportAllowed:true});const r=await f.call('/registrations.csv');assert.equal(r.status,200);assert.equal(r.headers.get('cache-control'),'no-store');const csv=await r.text();assert.ok(csv.includes('ASTHMA_PRIVATE'));assert.ok(csv.includes('BEE_PRIVATE'));assert.equal(f.audits.length,1);assert.equal(f.audits[0].actor,'admin@wwfc.org.uk');assert.equal(f.audits[0].recordCount,1);assert.equal(JSON.stringify(f.audits).includes('PRIVATE'),false);
-+});
-+test('audit failure prevents release of a full CSV',async t=>{
-+ const f=await fixture(t,{exportAllowed:true,auditFails:true});const r=await f.call('/registrations.csv');assert.equal(r.status,500);assert.equal((await r.text()).includes('PRIVATE'),false);
-+});
-+
-+test('shared-password login and legacy admin cookies cannot bypass named permission checks',async t=>{
-+ const f=await fixture(t);const previous=process.env.TRUDASH_ONLY_ADMIN_AUTH;process.env.TRUDASH_ONLY_ADMIN_AUTH='false';
-+ try{assert.equal((await f.call('/members',{signed:false,legacyCookie:true})).status,401);assert.equal((await f.call('/login',{signed:false,method:'POST'})).status,403);}finally{process.env.TRUDASH_ONLY_ADMIN_AUTH=previous;}
++test('eligible Super Admin can read the report; no destructive endpoint exists',async t=>{
++ const f=await fixture(t);const response=await f.call('chair@wwfc.org.uk');assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store');assert.equal((await response.json()).destructiveActionsEnabled,false);assert.equal(f.reads(),1);assert.equal((await f.call('chair@wwfc.org.uk','POST')).status,404);assert.equal(f.reads(),1);
 +});

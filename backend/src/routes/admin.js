@@ -18,6 +18,7 @@ async function requireAdmin(req, res, next) {
         const access = await require("../services/applicationPermissions").applicationAccess(req.trudashAdmin);
         if (!access.permissions.includes("MEMBERS_MANAGE")) return res.status(403).json({error:"Membership administrator access required"});
         req.trudashAdmin.fullCsvExport = access.permissions.includes("FULL_CSV_EXPORT");
+        req.applicationAccess = access;
         return next();
       } catch { return res.status(503).json({error:"Membership permissions could not be checked"}); }
     }
@@ -658,6 +659,11 @@ router.post(
     }
   }
 );
+router.get("/retention-review", requireAdmin, async(req,res)=>{
+  if(req.applicationAccess?.superAdmin !== true)return res.status(403).json({error:"Super Admin and membership management access required"});
+  try { res.json(await require("../services/retentionReview").retentionReview(prisma)); }
+  catch { res.status(500).json({error:"Retention review could not be generated"}); }
+});
 router.get("/members", requireAdmin, async (req, res) => {
   try {
     const registrations = await prisma.consentForm.findMany({
