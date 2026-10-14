@@ -13,6 +13,9 @@ function verifyTrudashAdmin(req, res) {
       algorithms: ["HS256"], issuer: "trudash", audience: "tcm-membership-admin",
       maxAge: "30s", clockTolerance: 2,
     });
+    const expectedScope = req.originalUrl.startsWith("/api/volunteers/admin") ? "volunteers"
+      : req.originalUrl.startsWith("/api/social-media/admin") ? "social" : "members";
+    if (claims.scope !== expectedScope) throw new Error("Wrong permission scope");
     const hash = crypto.createHash("sha256").update(JSON.stringify(req.body || null)).digest("hex");
     if (claims.role !== "membership_admin" || typeof claims.sub !== "string" ||
         claims.method !== req.method || claims.path !== req.originalUrl || claims.bodyHash !== hash ||
