@@ -4,10 +4,15 @@ const prisma = require("../prisma");
 const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
 const { normalisePostUrl } = require("../services/socialMediaService");
 const router = express.Router();
-router.use((req, res, next) => {
+router.use(async (req, res, next) => {
   res.set("Cache-Control", "no-store");
   if (!req.get("x-trudash-assertion")) return res.status(401).json({ error: "Sign in through TruDash" });
-  if (verifyTrudashAdmin(req, res)) next();
+  if (!verifyTrudashAdmin(req, res)) return;
+  try {
+    const access = await require("../services/applicationPermissions").applicationAccess(req.trudashAdmin);
+    if (!access.permissions.includes("MEMBERS_MANAGE")) return res.status(403).json({error:"Social media administration access required"});
+    next();
+  } catch { res.status(503).json({error:"Application permissions could not be checked"}); }
 });
 router.get("/", async (req, res) => {
   try {

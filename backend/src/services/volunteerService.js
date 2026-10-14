@@ -48,6 +48,7 @@ const signupSchema = z.object({
   phone: z.string().trim().min(7).max(30).regex(/^[+\d\s()-]+$/), team: z.string().trim().max(100).default(""),
   requestedRoles: roleSchema.min(1), acceptances: z.record(z.string(), z.string()),
 });
-const updateSchema = z.object({ updatedAt: z.string().datetime(), assignedRoles: roleSchema, status: z.enum(["AWAITING_REVIEW", "ACTIVE", "INACTIVE"]), notes: z.string().trim().max(4000), accessRole: z.enum(["NONE", "ADMIN", "SUPER_ADMIN"]) });
+const applicationPermissionKeys = ["MEMBERS_MANAGE", "VOLUNTEERS_MANAGE", "FINANCE_DETAILS", "WELFARE_DETAILS", "SOURCE_REPORTS", "FULL_CSV_EXPORT"];
+const updateSchema = z.object({ applicationPermissions: z.array(z.enum(applicationPermissionKeys)).max(applicationPermissionKeys.length).refine(p => new Set(p).size === p.length, "Duplicate permissions").optional(), updatedAt: z.string().datetime(), assignedRoles: roleSchema, status: z.enum(["AWAITING_REVIEW", "ACTIVE", "INACTIVE"]), notes: z.string().trim().max(4000), accessRole: z.enum(["NONE", "ADMIN", "SUPER_ADMIN"]) });
 const hashToken = token => crypto.createHash("sha256").update(token).digest("hex");
 module.exports = { roles, footballRoles, agreements, required, currentAcceptances, summary, acceptanceData, signupSchema, updateSchema, hashToken, prisma };

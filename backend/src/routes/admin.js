@@ -1,5 +1,4 @@
 const express = require("express");
-const jwt = require("jsonwebtoken");
 const { createObjectCsvStringifier } = require("csv-writer");
 
 const prisma = require("../prisma");
@@ -12,62 +11,24 @@ const { memberSelect, memberView } = require("../services/memberView");
 const router = express.Router();
 router.use((req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
 
-function requireAdmin(req, res, next) {
+async function requireAdmin(req, res, next) {
   if (req.get("x-trudash-assertion")) {
-    if (verifyTrudashAdmin(req, res)) return next();
+    if (verifyTrudashAdmin(req, res)) {
+      try {
+        const access = await require("../services/applicationPermissions").applicationAccess(req.trudashAdmin);
+        if (!access.permissions.includes("MEMBERS_MANAGE")) return res.status(403).json({error:"Membership administrator access required"});
+        req.trudashAdmin.fullCsvExport = access.permissions.includes("FULL_CSV_EXPORT");
+        return next();
+      } catch { return res.status(503).json({error:"Membership permissions could not be checked"}); }
+    }
     return;
   }
-  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
-    return res.status(401).json({ error: "Sign in through TruDash" });
-  }
-  const token = req.cookies?.admin_token;
-
-  if (!token) {
-    return res.status(401).json({ error: "Admin login required" });
-  }
-
-  try {
-    const claims = jwt.verify(token, process.env.JWT_SECRET);
-    if (claims.role !== "admin") throw new Error("Admin role required");
-    next();
-  } catch (err) {
-    return res.status(401).json({ error: "Invalid or expired admin session" });
-  }
+  return res.status(401).json({error:"Sign in through TruDash"});
 }
 
+// Shared-password access cannot identify the user for application permissions.
 router.post("/login", (req, res) => {
-  if (process.env.TRUDASH_ONLY_ADMIN_AUTH === "true") {
-    return res.status(403).json({ error: "Use Microsoft sign-in through TruDash" });
-  }
-  try {
-    const { password } = req.body;
-
-    if (!process.env.ADMIN_PASSWORD || !process.env.JWT_SECRET) {
-      return res.status(500).json({ error: "Admin auth is not configured" });
-    }
-
-    if (password !== process.env.ADMIN_PASSWORD) {
-      return res.status(401).json({ error: "Incorrect password" });
-    }
-
-    const token = jwt.sign(
-      { role: "admin" },
-      process.env.JWT_SECRET,
-      { expiresIn: "8h" }
-    );
-
-    res.cookie("admin_token", token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      maxAge: 8 * 60 * 60 * 1000,
-    });
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error("Admin login error:", err);
-    res.status(500).json({ error: "Admin login failed" });
-  }
+  res.status(403).json({error:"Use Microsoft sign-in through TruDash"});
 });
 
 router.post("/logout", (req, res) => {

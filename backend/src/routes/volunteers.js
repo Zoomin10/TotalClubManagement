@@ -2,6 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const service = require("../services/volunteerService");
 const { verifyTrudashAdmin } = require("../middleware/trudashAdmin");
+const { applicationAccess, permissionOptions } = require("../services/applicationPermissions");
 const router = express.Router();
 const include = { acceptances: true };
 // Bound anonymous submission frequency. Reverse-proxy IPs are deliberately not trusted.
@@ -60,11 +61,8 @@ router.post("/accept/:token", rateLimit, async (req, res) => {
 // Every volunteer request rechecks current access; sign-in and member privileges
 // do not grant volunteer administration. Bootstrap users recover initial access.
 async function volunteerAccess(identity, db = service.prisma) {
-  if (identity.volunteerSuperAdmin) return { available: true, superAdmin: true };
-  const actor = await db.clubVolunteer.findUnique({ where: { email: identity.username }, include });
-  const available = Boolean(actor && actor.status === "ACTIVE" &&
-    ["ADMIN", "SUPER_ADMIN"].includes(actor.accessRole) && !service.currentAcceptances(actor).length);
-  return { available, superAdmin: available && actor.accessRole === "SUPER_ADMIN" };
+  const access = await applicationAccess(identity, db);
+  return {available:access.permissions.includes("VOLUNTEERS_MANAGE"),superAdmin:access.superAdmin};
 }
 router.use("/admin", async (req, res, next) => {
   res.set("Cache-Control", "no-store");
@@ -82,7 +80,7 @@ router.get("/admin", async (req, res) => {
   try {
     const volunteers = await service.prisma.clubVolunteer.findMany({ include, orderBy: { createdAt: "desc" } });
     const superAdmin = req.volunteerAccess.superAdmin;
-    res.json({ volunteers: volunteers.map(service.summary), roles: service.roles, superAdmin: Boolean(superAdmin) });
+    res.json({ volunteers: volunteers.map(service.summary), roles: service.roles, superAdmin: Boolean(superAdmin), permissionOptions });
   } catch { res.status(500).json({ error: "Volunteers could not be loaded." }); }
 });
 router.patch("/admin/:id", async (req, res) => {
@@ -95,13 +93,16 @@ router.patch("/admin/:id", async (req, res) => {
       const access = await volunteerAccess(req.trudashAdmin, tx);
       if (!access.available) throw Object.assign(new Error("Volunteer administrator access required"), { statusCode: 403 });
       const superAdmin = access.superAdmin;
-      if ((parsed.data.accessRole !== v.accessRole || v.accessRole === "SUPER_ADMIN") && !superAdmin) throw Object.assign(new Error("Super Admin access is required to change this record or access permissions."), { statusCode: 403 });
+      const permissionChanges = parsed.data.applicationPermissions !== undefined &&
+        [...parsed.data.applicationPermissions].sort().join("|") !== [...(v.applicationPermissions || [])].sort().join("|");
+      if (permissionChanges && !superAdmin) throw Object.assign(new Error("Super Admin access is required to change application permissions."), {statusCode:403});
+      if ((parsed.data.accessRole !== v.accessRole || v.accessRole === "SUPER_ADMIN" || (v.applicationPermissions || []).length > 0) && !superAdmin) throw Object.assign(new Error("Super Admin access is required to change this record or access permissions."), { statusCode: 403 });
       if (v.updatedAt.toISOString() !== parsed.data.updatedAt) throw Object.assign(new Error("This record has changed. Refresh before saving."), { statusCode: 409 });
       const { updatedAt, ...changes } = parsed.data;
       if (changes.status === "ACTIVE" && !changes.assignedRoles.length) throw Object.assign(new Error("Assign at least one club role before activation."), { statusCode: 409 });
       const updated = await tx.clubVolunteer.update({ where: { id: v.id }, data: changes, include });
       if (updated.status === "ACTIVE" && service.currentAcceptances(updated).length) throw Object.assign(new Error("Required agreements must be accepted before activation."), { statusCode: 409 });
-      await tx.volunteerChange.create({ data: { volunteerId: v.id, actor: req.trudashAdmin.username, action: "UPDATED", details: { before: { assignedRoles: v.assignedRoles, accessRole: v.accessRole, status: v.status, notes: v.notes }, after: parsed.data } } });
+      await tx.volunteerChange.create({ data: { volunteerId: v.id, actor: req.trudashAdmin.username, action: "UPDATED", details: { before: { applicationPermissions: v.applicationPermissions || [], assignedRoles: v.assignedRoles, accessRole: v.accessRole, status: v.status, notes: v.notes }, after: parsed.data } } });
       return service.summary(updated);
     }, { isolationLevel: "Serializable" });
     res.json(result);
@@ -116,7 +117,7 @@ router.post("/admin/:id/acceptance-link", async (req, res) => {
       const v = await tx.clubVolunteer.findUnique({ where: { id: req.params.id } });
       if (!v) throw Object.assign(new Error("Volunteer not found."), { statusCode: 404 });
       const access = await volunteerAccess(req.trudashAdmin, tx);
-      if (!access.available || (v.accessRole === "SUPER_ADMIN" && !access.superAdmin)) throw Object.assign(new Error("Volunteer administrator permission required for this record."), { statusCode: 403 });
+      if (!access.available || ((v.accessRole === "SUPER_ADMIN" || (v.applicationPermissions || []).length > 0) && !access.superAdmin)) throw Object.assign(new Error("Volunteer administrator permission required for this record."), { statusCode: 403 });
       await tx.clubVolunteer.update({ where: { id: v.id }, data: { acceptanceTokenHash: service.hashToken(token), acceptanceTokenExpiresAt: new Date(Date.now() + 30 * 86400000) } });
       await tx.volunteerChange.create({ data: { volunteerId: v.id, actor: req.trudashAdmin.username, action: "ACCEPTANCE_LINK_CREATED", details: {} } });
     });

@@ -40,6 +40,7 @@ app.use(cookieParser());
 app.use("/api/social-media/admin", require("./routes/socialMedia"));
 app.use("/api/volunteers", require("./routes/volunteers"));
 app.use("/api/consent", consentRoutes);
+app.use("/api/access", require("./routes/applicationAccess"));
 app.use("/api/admin", adminRoutes);
 
 app.get("/api/health", (req, res) => {

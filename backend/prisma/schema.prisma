@@ -104,6 +104,7 @@ model ClubVolunteer {
   team                     String?
   requestedRoles           Json
   assignedRoles            Json
+  applicationPermissions   String[]              @default([])
   accessRole               String                @default("NONE")
   status                   String                @default("AWAITING_REVIEW")
   notes                    String                @default("")
