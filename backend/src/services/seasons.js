@@ -174,7 +174,7 @@ async function checkout(membershipId) {
     where: { id: membershipId },
     include,
   });
-  if (!m || m.state !== "ACCEPTED" || m.leftAt)
+  if (!m || m.registration.archivedAt || m.state !== "ACCEPTED" || m.leftAt)
     throw fail("This season membership is not ready for payment setup");
   if (m.stripeScheduleId || m.stripeSubscriptionId) return null;
   const stripe = getStripe();
@@ -278,7 +278,7 @@ async function completeSetup(stripe, session) {
   )
     throw fail("Season checkout mismatch");
   own(session, m.registration);
-  if (m.state !== "ACCEPTED" || m.leftAt) return true;
+  if (m.registration.archivedAt || m.state !== "ACCEPTED" || m.leftAt) return true;
   if (m.stripeScheduleId) {
     const schedule = await stripe.subscriptionSchedules.retrieve(
       m.stripeScheduleId,
@@ -496,6 +496,7 @@ async function leaveAll(registrationId, actor) {
     where: { id: registrationId },
   });
   if (!registration) throw fail("Member not found", 404);
+  if(registration.archivedAt)throw fail("Restore and review this archived record before membership actions",403);
   const items = await prisma.$transaction(async (tx) => {
     const rows = await tx.seasonMembership.findMany({
       where: { registrationId },

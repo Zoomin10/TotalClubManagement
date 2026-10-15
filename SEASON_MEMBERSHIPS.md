@@ -66,7 +66,7 @@ The package was checked with 27 local automated tests, both frontend builds, Pri
 ## Limits and handling
 
 - Accepted renewals after the first-payment date, including delayed card setup, require club review. The app refuses to backdate or take an unannounced immediate payment. It does not silently change the agreed date.
-- The existing retention-review report still infers seasons from original registration dates. It now explicitly directs you to confirmed season records. It does not incorporate renewals/departures yet, archive records or delete anything. Automatic archiving and separate holds/retention decisions remain future work.
+- The subsequent retention/archive update supersedes the original read-only report. See RETENTION_ARCHIVE_UPDATE.md for confirmed-season review, supervised restricted archives, holds and restore. There is still no automatic archiving or permanent deletion; policy periods and separate financial/safeguarding rules require approval.
 - New season memberships are protected from the old test-member deletion button by a server check and restrictive database relationships. Use departure, not deletion, for these records.
 - Private renewal URLs are bearer credentials and reveal limited member/contact details to their holder. Store/share them securely and avoid including full URLs in logs or analytics. Tokens are hashed in the database and consumed after payment setup; no third-party scripts were added to the page. The public endpoint has a small in-process rate cap; production infrastructure-level abuse controls are separate work.
 - Leaving preserves invoices and may leave previously failed invoices open. Review arrears separately, including any Stripe retry settings. No refund or automatic debt write-off is performed.

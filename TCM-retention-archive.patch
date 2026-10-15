@@ -1,0 +1,1584 @@
+diff --git a/RETENTION_ARCHIVE_UPDATE.md b/RETENTION_ARCHIVE_UPDATE.md
+new file mode 100644
+index 0000000..cf45544
+--- /dev/null
++++ b/RETENTION_ARCHIVE_UPDATE.md
+@@ -0,0 +1,78 @@
++# Reviewed retention and restricted archive — 15 October 2026
++
++This is an incremental update on top of the previously delivered season-memberships feature. It does not add bulk renewals. No Railway database, Stripe record or live service was changed while preparing it.
++
++## What changes
++
++- TruDash **Membership pilot → Retention & archive** replaces the earlier read-only, registration-date-based review. Access requires both Super Admin and MEMBERS_MANAGE, checked on TruDash and again on TCM.
++- The review uses confirmed seasonal memberships, including administrator-confirmed legacy memberships. Original registration dates remain labelled estimates only and cannot authorise an archive. Unaccepted offers and renewals cancelled before their season starts do not establish a later actual membership season.
++- Current members, accepted future renewals, mid-season leavers whose actual season has not ended, and members with open unpaid invoices cannot be archived. For your current test members in 2026 / 27, being marked Cancelled on an advanced Stripe clock does not make their real-world retention season end early. Stripe simulation time is not used as the app's retention calendar.
++- An eligible record is archived only after an administrator confirms non-renewal, records a general reason and chooses a justified future review date. The backend verifies that the Stripe customer has no active or future schedules/subscriptions; a released schedule with an ongoing subscription is insufficient. This action does not cancel billing or settle debts.
++- Archive flags, token invalidation and metadata audit are committed together. A failed audit rolls the action back. Archived members are excluded from the normal directory, registration JSON, dashboard, season-management list and regular CSV, including the full medical CSV. This changes the directory's total to mean non-archived registrations.
++- Archive review shows only limited identifying/season/retention metadata, not health declarations or contacts. Ordinary member managers cannot access an archived member's invoice API by guessing their ID. Super Admin invoice access remains permission-checked and is logged before release.
++- Holds may be set on active or archived records. They prevent the existing test-delete route from removing the record. Archive/restore preserve a hold; releasing it is a separate, reasoned and audited action. An archive is a restriction of use, so it is allowed while a hold preserves the data.
++- Restore returns the record to normal views but does not recreate tokens, renew membership, remove holds or restart payments. An administrator can record a continued-retention review with a new justified review date while the record remains archived. Overdue reviews are visibly flagged.
++- Permanent deletion is not provided in this workflow. The proposed twelve months is not silently adopted as policy and no review date authorises deletion. The old test-delete route is blocked for held/archived/season-history records. This is a technical retention control, not a declaration that the whole club is GDPR compliant.
++- Returning from retention or season management resets the member directory to All members and clears filters, addressing the earlier confusion about a member disappearing from the filtered view.
++
++## Apply in Development first
++
++1. The package contains changed files under `TotalClubManagement/` and `TruDash/`. Copy each folder's contents into the matching repository, preserving the paths and comparing any later local edits. Do not replace whole repositories. Alternatively use the included incremental patch per repository after `git apply --check`; do not both copy and apply a patch.
++2. Commit to the development branches. No new dependency, API key or routine Railway variable is required. Existing Microsoft/bridge/application permissions remain in use. Keep the current Stripe test-only restriction.
++3. Deploy the TCM backend first with Prisma generation and the normal migration deployment step. From `backend`, run `npx --no-install prisma migrate deploy` against the intended DEVELOPMENT database. The committed migration is `20261015080000_add_member_archive`; it adds six optional columns and MemberRetentionAudit. It does not archive, delete or backfill anyone. Do not run `migrate reset`.
++4. Deploy TruDash, sign in again if needed, and open **Membership pilot → Retention & archive**. There are no TCM public-frontend changes in this package. New archive guards affect both old and seasonal payment setup, so keep this backend version once using archives.
++5. Back up and verify the target database as part of your normal deployment procedure. Production rollout and policy approval remain separate steps. Database owners and backup operators can still access stored data; archive restrictions do not replace platform access controls.
++
++## Test normal controls with your existing test members
++
++- As a Super Admin with MEMBERS_MANAGE, open Retention & archive. Check known confirmed seasons are displayed, with no medical or contact details.
++- A 2026 / 27 member must remain ineligible until the real season end, even if you advanced their Stripe clock into July 2027. A member without an actual season confirmation must show Confirm actual season, not an inferred approval.
++- An accepted future season must block archive. A future offer alone is not accepted renewal, but its season does not qualify as historical membership evidence either.
++- Set a hold with a generic reason such as `Test case reference RET-001`. Verify ConsentForm.retentionHoldAt/reason and MemberRetentionAudit. Release it separately and verify another audit row. Do not put medical/complaint details into reason fields.
++- Sign in as a member manager who is not a Super Admin. The retention area and `/api/membership-pilot/retention-review` must be unavailable/403. POST `/api/membership-pilot/retention/<id>/archive`, `/restore`, `/hold`, and `/review` must also be refused. Accounts without member-management permission remain blocked altogether.
++
++## Test a successful archive now without altering real season dates
++
++A synthetic fixture script is included because your actual season has not ended. It creates one fake, previously ended membership and NO Stripe customer, payment, invoice or subscription. It never changes an existing member and refuses to reset its fixture if already present.
++
++Run it **locally from TCM/backend**, explicitly targeting your DEVELOPMENT database. Set local environment variables in PowerShell:
++
++```powershell
++$env:NODE_ENV = "development"
++$env:RETENTION_FIXTURE_ENVIRONMENT = "development"
++$env:RETENTION_FIXTURE_DATABASE_URL = "PASTE_THE_DEVELOPMENT_DATABASE_CONNECTION_URL_HERE"
++node scripts/seed-retention-fixture.cjs --confirm-development-fixture
++Remove-Item Env:RETENTION_FIXTURE_DATABASE_URL
++Remove-Item Env:RETENTION_FIXTURE_ENVIRONMENT
++```
++
++Use the development database's externally accessible connection URL for your local machine, not `postgres.railway.internal` and not the Production connection. Do not paste that secret into chat, Git or screenshots. The script's three-part opt-in is to prevent accidental execution; it cannot independently identify which Railway environment a supplied URL belongs to.
++
++Then:
++
++1. Find **Archive Test Fixture**, team **GDPR ARCHIVE TEST**, in the directory and retention review. Its fake season ended before today's real date. It should be eligible for Review archive.
++2. Set a hold and then choose Review archive. Enter a general reason, a future review date and explicitly confirm non-renewal. A hold should remain recorded after archiving.
++3. Confirm that it disappears from the normal directory, ordinary registrations endpoint, season list and CSV. It should remain under Archived in the Super Admin retention area. In Postgres, check the archive fields and MemberRetentionAudit action ARCHIVED. The actual record remains stored.
++4. As a non-Super member manager, request `/api/membership-pilot/registrations/gdpr-archive-development-fixture/invoices`. Expect 403. Try the old DELETE endpoint with confirmation: it must not remove an archived/held record, even for a Super Admin.
++5. Use Record review, provide a continued-retention justification and a new date. Confirm ARCHIVE_REVIEWED is logged without restoring the member.
++6. Restore with a reason. Confirm the member reappears, the hold remains, and no Stripe billing or renewal link is created. Check RESTORED in the audit. Release the hold explicitly if this test is complete.
++7. To exercise the due-review badge, use local automated tests with an injected future date. Do not change real registrations, database dates or a production server clock simply to make them eligible. Advancing Stripe alone intentionally cannot age retention records.
++
++## Validation and remaining decisions
++
++Local validation: 52 TCM tests (including the previous billing/renewal regression suite), 3 TruDash bridge tests, both frontend builds, Prisma format/validate/generate, and all 11 migrations applied in isolated embedded PostgreSQL. The fixture's refusal without explicit opt-in was checked; it has not been run against your database. Live Railway/Stripe behaviour still needs your Development verification.
++
++Run from each repository root:
++
++```
++# TCM, after installing backend dependencies
++node --test tests/*.cjs
++npm --prefix frontend run build
++# TruDash
++node --test tests/season-proxy.cjs
++npm --prefix frontend run build
++```
++
++The club still needs approved category-specific retention periods, review ownership/frequency, hold-release authority, backup expiry/restore handling and a justified deletion/redaction process. Children’s medical declarations, membership evidence, financial invoices and safeguarding/legal cases should not all be assigned a blanket twelve months. This update preserves existing financial and health data rather than pretending that restricted archiving is deletion. Historical records with no confirmed membership season require further supervised confirmation before they can enter this workflow.
++
++Other outstanding compliance work remains separate: confirm published notices and lawful bases, evidence of health-data consent across all enabled form paths, DPIA screening, processing records, supplier terms/transfers, M365/Railway security and backup checks, and tested subject-rights/breach procedures. Audit/log retention itself also needs an approved schedule. The changes do not certify legal compliance or inspect your deployed platform settings.
+diff --git a/SEASON_MEMBERSHIPS.md b/SEASON_MEMBERSHIPS.md
+index 5785972..ff396c1 100644
+--- a/SEASON_MEMBERSHIPS.md
++++ b/SEASON_MEMBERSHIPS.md
+@@ -66,7 +66,7 @@ The package was checked with 27 local automated tests, both frontend builds, Pri
+ ## Limits and handling
+ 
+ - Accepted renewals after the first-payment date, including delayed card setup, require club review. The app refuses to backdate or take an unannounced immediate payment. It does not silently change the agreed date.
+-- The existing retention-review report still infers seasons from original registration dates. It now explicitly directs you to confirmed season records. It does not incorporate renewals/departures yet, archive records or delete anything. Automatic archiving and separate holds/retention decisions remain future work.
++- The subsequent retention/archive update supersedes the original read-only report. See RETENTION_ARCHIVE_UPDATE.md for confirmed-season review, supervised restricted archives, holds and restore. There is still no automatic archiving or permanent deletion; policy periods and separate financial/safeguarding rules require approval.
+ - New season memberships are protected from the old test-member deletion button by a server check and restrictive database relationships. Use departure, not deletion, for these records.
+ - Private renewal URLs are bearer credentials and reveal limited member/contact details to their holder. Store/share them securely and avoid including full URLs in logs or analytics. Tokens are hashed in the database and consumed after payment setup; no third-party scripts were added to the page. The public endpoint has a small in-process rate cap; production infrastructure-level abuse controls are separate work.
+ - Leaving preserves invoices and may leave previously failed invoices open. Review arrears separately, including any Stripe retry settings. No refund or automatic debt write-off is performed.
+diff --git a/backend/prisma/migrations/20261015080000_add_member_archive/migration.sql b/backend/prisma/migrations/20261015080000_add_member_archive/migration.sql
+new file mode 100644
+index 0000000..3079cb3
+--- /dev/null
++++ b/backend/prisma/migrations/20261015080000_add_member_archive/migration.sql
+@@ -0,0 +1,22 @@
++-- AlterTable
++ALTER TABLE "ConsentForm" ADD COLUMN     "archiveReason" TEXT,
++ADD COLUMN     "archiveReviewAt" TIMESTAMP(3),
++ADD COLUMN     "archiveSeasonId" TEXT,
++ADD COLUMN     "archivedAt" TIMESTAMP(3),
++ADD COLUMN     "retentionHoldAt" TIMESTAMP(3),
++ADD COLUMN     "retentionHoldReason" TEXT;
++
++-- CreateTable
++CREATE TABLE "MemberRetentionAudit" (
++    "id" TEXT NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "actor" TEXT NOT NULL,
++    "registrationId" TEXT NOT NULL,
++    "action" TEXT NOT NULL,
++    "details" JSONB NOT NULL,
++
++    CONSTRAINT "MemberRetentionAudit_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE INDEX "MemberRetentionAudit_registrationId_createdAt_idx" ON "MemberRetentionAudit"("registrationId", "createdAt");
+diff --git a/backend/prisma/schema.prisma b/backend/prisma/schema.prisma
+index 9554da4..0cb4808 100644
+--- a/backend/prisma/schema.prisma
++++ b/backend/prisma/schema.prisma
+@@ -53,6 +53,12 @@ model ConsentForm {
+ 
+   // Subscription state; separate from successful payment history
+   stripeSubscriptionStatus String?
++  archivedAt               DateTime?
++  archiveSeasonId          String?
++  archiveReason            String?
++  archiveReviewAt          DateTime?
++  retentionHoldAt          DateTime?
++  retentionHoldReason      String?
+   seasonMemberships        SeasonMembership[]
+   invoices                 MembershipInvoice[]
+ }
+@@ -231,3 +237,15 @@ model SeasonChange {
+ 
+   @@index([createdAt])
+ }
++
++// Metadata-only record of supervised retention actions; no medical values or tokens.
++model MemberRetentionAudit {
++  id             String   @id @default(cuid())
++  createdAt      DateTime @default(now())
++  actor          String
++  registrationId String
++  action         String
++  details        Json
++
++  @@index([registrationId, createdAt])
++}
+diff --git a/backend/scripts/seed-retention-fixture.cjs b/backend/scripts/seed-retention-fixture.cjs
+new file mode 100644
+index 0000000..7f1da45
+--- /dev/null
++++ b/backend/scripts/seed-retention-fixture.cjs
+@@ -0,0 +1,93 @@
++// Explicit opt-in only. Creates one synthetic member; never changes an existing member.
++require("dotenv").config();
++const { PrismaClient } = require("@prisma/client");
++const { DateTime } = require("luxon");
++async function main() {
++  if (
++    !process.argv.includes("--confirm-development-fixture") ||
++    process.env.RETENTION_FIXTURE_ENVIRONMENT !== "development" ||
++    !process.env.RETENTION_FIXTURE_DATABASE_URL
++  )
++    throw Error(
++      "Set RETENTION_FIXTURE_ENVIRONMENT=development and RETENTION_FIXTURE_DATABASE_URL to your DEVELOPMENT database, then supply --confirm-development-fixture.",
++    );
++  if (process.env.NODE_ENV === "production")
++    throw Error(
++      "Run locally against an explicitly chosen development database, not from a production process.",
++    );
++  const db = new PrismaClient({
++    datasources: { db: { url: process.env.RETENTION_FIXTURE_DATABASE_URL } },
++  });
++  try {
++    const now = DateTime.now().setZone("Europe/London");
++    const year = now.month >= 6 ? now.year - 1 : now.year - 2;
++    const startsAt = DateTime.utc(year, 6, 1).toJSDate(),
++      endsAt = DateTime.utc(year + 1, 6, 1).toJSDate();
++    const id = "gdpr-archive-development-fixture";
++    await db.$transaction(async (tx) => {
++      if (await tx.consentForm.findUnique({ where: { id } }))
++        throw Error(
++          "Synthetic fixture already exists. Use its current state; this script never resets it.",
++        );
++      const season = await tx.clubSeason.upsert({
++        where: { startYear: year },
++        update: {},
++        create: {
++          startYear: year,
++          label: `${year} / ${String(year + 1).slice(-2)}`,
++          startsAt,
++          endsAt,
++          status: "DRAFT",
++          termsVersion: "ARCHIVE-FIXTURE-ONLY",
++          termsContent:
++            "Synthetic expired-season fixture for development archive verification only.",
++        },
++      });
++      await tx.consentForm.create({
++        data: {
++          id,
++          createdAt: startsAt,
++          ageGroup: "u9",
++          wwfcTeam: "GDPR ARCHIVE TEST",
++          playerFirstName: "Archive",
++          playerSurname: "Test Fixture",
++          playerDob: new Date("2017-01-01"),
++          playerSex: "Female",
++          emergencyContact1: {},
++          emergencyContact2: {},
++          postcode: "",
++          houseNumber: "",
++          email: "",
++          medicalInfo: "",
++          consentData: false,
++          consentPhotos: false,
++          consentVideos: false,
++          parentSignature: "SYNTHETIC FIXTURE",
++          parentName: "SYNTHETIC FIXTURE",
++          signatureDate: startsAt,
++          stripeSubscriptionStatus: "canceled",
++          seasonMemberships: {
++            create: {
++              seasonId: season.id,
++              state: "LEFT",
++              origin: "NEW_REGISTRATION",
++              acceptedAt: startsAt,
++              firstPaymentDate: startsAt,
++              leftAt: new Date(endsAt.getTime() - 86400000),
++              billingStatus: "canceled",
++            },
++          },
++        },
++      });
++    });
++    console.log(
++      "Created synthetic Archive Test Fixture in the explicitly selected development database. No Stripe customer, payment method, invoice or subscription was created.",
++    );
++  } finally {
++    await db.$disconnect();
++  }
++}
++main().catch((e) => {
++  console.error(e.message);
++  process.exitCode = 1;
++});
+diff --git a/backend/src/routes/admin.js b/backend/src/routes/admin.js
+index 79a7414..c411cfa 100644
+--- a/backend/src/routes/admin.js
++++ b/backend/src/routes/admin.js
+@@ -19,6 +19,15 @@ async function requireAdmin(req, res, next) {
+         if (!access.permissions.includes("MEMBERS_MANAGE")) return res.status(403).json({error:"Membership administrator access required"});
+         req.trudashAdmin.fullCsvExport = access.permissions.includes("FULL_CSV_EXPORT");
+         req.applicationAccess = access;
++        const target=/^\/registrations\/([A-Za-z0-9_-]+)(?:\/|$)/.exec(req.path);
++        if(target){
++          const record=await prisma.consentForm.findUnique({where:{id:target[1]},select:{archivedAt:true,retentionHoldAt:true}});
++          if(req.method==="DELETE"&&(record?.archivedAt||record?.retentionHoldAt))return res.status(409).json({error:"Archived or held records cannot be deleted"});
++          if(record?.archivedAt){
++            if(!access.superAdmin||req.method!=="GET")return res.status(403).json({error:"This record is archived; supervised archive access is required"});
++            await prisma.memberRetentionAudit.create({data:{actor:req.trudashAdmin.username,registrationId:target[1],action:"ARCHIVED_INVOICES_ACCESSED",details:{}}});
++          }
++        }
+         return next();
+       } catch { return res.status(503).json({error:"Membership permissions could not be checked"}); }
+     }
+@@ -53,7 +62,7 @@ function isDevelopmentAge(ageGroup) {
+ 
+ router.get("/dashboard", requireAdmin, async (req, res) => {
+   try {
+-    const forms = await prisma.consentForm.findMany();
++    const forms = await prisma.consentForm.findMany({where:{archivedAt:null},select:{ageGroup:true,playerSex:true}});
+ 
+     const total = forms.length;
+     const boys = forms.filter((f) => f.playerSex === "Male").length;
+@@ -77,7 +86,9 @@ router.get("/registrations", requireAdmin, async (req, res) => {
+     const { ageGroup, wwfcTeam, playerSex } = req.query;
+ 
+     const registrations = await prisma.consentForm.findMany({
++      select:memberSelect,
+       where: {
++        archivedAt:null,
+         ageGroup: ageGroup || undefined,
+         wwfcTeam: wwfcTeam || undefined,
+         playerSex: playerSex || undefined,
+@@ -230,6 +241,7 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
+       const current = await tx.consentForm.findUnique({
+         where: { id: registration.id },
+       });
++      if(current?.archivedAt||current?.retentionHoldAt){const error=new Error("Archived or held records cannot be deleted");error.statusCode=409;throw error;}
+ 
+       if (!current) {
+         const error = new Error("Member not found");
+@@ -256,9 +268,10 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
+         where: { registrationId: registration.id },
+       });
+ 
+-      await tx.consentForm.delete({
+-        where: { id: registration.id },
++      const removed=await tx.consentForm.deleteMany({
++        where: { id: registration.id,archivedAt:null,retentionHoldAt:null },
+       });
++      if(!removed.count){const error=new Error("Record was archived or placed on hold; deletion stopped");error.statusCode=409;throw error;}
+     });
+ 
+     res.json({ success: true });
+@@ -280,6 +293,7 @@ router.get("/registrations.csv", requireAdmin, async (req, res) => {
+   }
+   try {
+     const forms = await prisma.consentForm.findMany({
++      where:{archivedAt:null},
+       orderBy: { createdAt: "desc" },
+     });
+     
+@@ -673,6 +687,7 @@ router.get("/retention-review", requireAdmin, async(req,res)=>{
+ router.get("/members", requireAdmin, async (req, res) => {
+   try {
+     const registrations = await prisma.consentForm.findMany({
++      where:{archivedAt:null},
+       orderBy: { createdAt: "desc" },
+       select: {
+         ...memberSelect,
+@@ -738,4 +753,5 @@ router.post("/registrations/:id/payment-setup", requireAdmin, async (req, res) =
+   }
+ });
+ 
++router.use("/retention",requireAdmin,require("./retention"));
+ module.exports = router;
+\ No newline at end of file
+diff --git a/backend/src/routes/retention.js b/backend/src/routes/retention.js
+new file mode 100644
+index 0000000..cce6c2e
+--- /dev/null
++++ b/backend/src/routes/retention.js
+@@ -0,0 +1,119 @@
++const router = require("express").Router();
++const { z } = require("zod");
++const prisma = require("../prisma");
++const service = require("../services/retentionReview");
++const { getStripe } = require("../services/stripeService");
++router.use((req, res, next) => {
++  if (!req.applicationAccess?.superAdmin)
++    return res.status(403).json({ error: "Super Admin access required" });
++  next();
++});
++const error = (res, e) => {
++  if (!e.statusCode)
++    console.error("Retention action failed:", e.code || e.name);
++  res
++    .status(e.statusCode || (e.code === "P2034" ? 409 : 500))
++    .json({
++      error: e.statusCode
++        ? e.message
++        : e.code === "P2034"
++          ? "Record changed concurrently. Refresh and review before retrying."
++          : "Retention action failed; refresh and check the result before retrying.",
++    });
++};
++const reason = z.string().trim().min(10).max(300);
++router.post("/:id/archive", async (req, res) => {
++  const p = z
++    .object({
++      confirm: z.literal(true),
++      nonRenewalConfirmed: z.literal(true),
++      reason,
++      reviewDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
++    })
++    .safeParse(req.body);
++  if (!p.success)
++    return res
++      .status(400)
++      .json({
++        error:
++          "Confirm non-renewal, provide a reason (10–300 characters), and choose an archive review date",
++      });
++  try {
++    await service.archive(
++      prisma,
++      getStripe,
++      req.params.id,
++      req.trudashAdmin.username,
++      p.data,
++    );
++    res.json({ success: true });
++  } catch (e) {
++    error(res, e);
++  }
++});
++router.post("/:id/restore", async (req, res) => {
++  const p = z.object({ confirm: z.literal(true), reason }).safeParse(req.body);
++  if (!p.success)
++    return res.status(400).json({ error: "Confirmation and reason required" });
++  try {
++    await service.restore(
++      prisma,
++      req.params.id,
++      req.trudashAdmin.username,
++      p.data.reason,
++    );
++    res.json({
++      success: true,
++      message:
++        "Record restored. Billing and renewal links have not been restarted.",
++    });
++  } catch (e) {
++    error(res, e);
++  }
++});
++router.post("/:id/hold", async (req, res) => {
++  const p = z
++    .object({ confirm: z.literal(true), enabled: z.boolean(), reason })
++    .safeParse(req.body);
++  if (!p.success)
++    return res
++      .status(400)
++      .json({ error: "Confirmation, hold setting and reason required" });
++  try {
++    await service.hold(
++      prisma,
++      req.params.id,
++      req.trudashAdmin.username,
++      p.data.enabled,
++      p.data.reason,
++    );
++    res.json({ success: true });
++  } catch (e) {
++    error(res, e);
++  }
++});
++router.post("/:id/review", async (req, res) => {
++  const p = z
++    .object({
++      confirm: z.literal(true),
++      reason,
++      reviewDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
++    })
++    .safeParse(req.body);
++  if (!p.success)
++    return res
++      .status(400)
++      .json({ error: "Confirmation, review date and justification required" });
++  try {
++    await service.review(
++      prisma,
++      req.params.id,
++      req.trudashAdmin.username,
++      p.data,
++    );
++    res.json({ success: true });
++  } catch (e) {
++    error(res, e);
++  }
++});
++module.exports = router;
+diff --git a/backend/src/routes/seasons.js b/backend/src/routes/seasons.js
+index e364996..dfe2a03 100644
+--- a/backend/src/routes/seasons.js
++++ b/backend/src/routes/seasons.js
+@@ -71,7 +71,7 @@ const safeContact = (c) =>
+ router.get("/renew/:token", async (req, res) => {
+   try {
+     const m = await tokenMembership(req.params.token);
+-    if (!m || m.leftAt)
++    if (!m || m.leftAt || m.registration.archivedAt)
+       throw service.fail("This renewal link is unavailable or expired", 404);
+     if (m.state === "ACCEPTED")
+       return res.json({
+@@ -141,7 +141,7 @@ router.post("/renew/:token", async (req, res) => {
+       });
+     const d = parsed.data;
+     const m = await tokenMembership(req.params.token);
+-    if (!m || m.leftAt) throw service.fail("Renewal link unavailable", 404);
++    if (!m || m.leftAt || m.registration.archivedAt) throw service.fail("Renewal link unavailable", 404);
+     if (m.state !== "OFFERED")
+       throw service.fail("Renewal already accepted. Use Resume payment setup.");
+     if (m.season.status !== "PUBLISHED" || m.season.startsAt <= new Date())
+@@ -182,8 +182,8 @@ router.post("/renew/:token", async (req, res) => {
+         });
+         if (!claimed.count)
+           throw service.fail("Renewal changed or already accepted");
+-        await tx.consentForm.update({
+-          where: { id: m.registrationId },
++        const updated=await tx.consentForm.updateMany({
++          where: { id: m.registrationId, archivedAt:null },
+           data: {
+             emergencyContact1: {
+               ...m.registration.emergencyContact1,
+@@ -204,6 +204,7 @@ router.post("/renew/:token", async (req, res) => {
+             signatureDate: new Date(),
+           },
+         });
++        if(!updated.count)throw service.fail("This membership is archived. Contact the club.");
+         await tx.seasonChange.create({
+           data: {
+             actor: "parent-renewal",
+@@ -267,6 +268,7 @@ router.get("/admin", async (req, res) => {
+       orderBy: { startYear: "desc" },
+     });
+     const memberships = await prisma.seasonMembership.findMany({
++      where:{registration:{archivedAt:null}},
+       select: {
+         id: true,
+         seasonId: true,
+@@ -332,7 +334,7 @@ router.post("/admin", async (req, res) => {
+       const s = await tx.clubSeason.create({
+         data: {
+           startYear: d.startYear,
+-          label: `${d.startYear}/${String(d.startYear + 1).slice(-2)}`,
++          label: `${d.startYear} / ${String(d.startYear + 1).slice(-2)}`,
+           ...service.dates(d.startYear),
+           termsVersion: d.termsVersion,
+           termsContent: d.termsContent,
+@@ -399,7 +401,7 @@ router.post(
+       const r = await prisma.consentForm.findUnique({
+         where: { id: req.params.registrationId },
+       });
+-      if (!r) throw service.fail("Member not found", 404);
++      if (!r || r.archivedAt) throw service.fail("Active member not found", 404);
+       const token = crypto.randomBytes(32).toString("hex");
+       const m = await prisma.$transaction(async (tx) => {
+         const existing = await tx.seasonMembership.findUnique({
+@@ -459,7 +461,7 @@ router.post(
+       const r = await prisma.consentForm.findUnique({
+         where: { id: req.params.registrationId },
+       });
+-      if (!s || !r || s.startsAt > new Date())
++      if (!s || !r || r.archivedAt || s.startsAt > new Date())
+         throw service.fail("Choose this member’s current season");
+       res.json(await service.endLegacy(r, s, req.trudashAdmin.username));
+     } catch (e) {
+diff --git a/backend/src/routes/stripeWebhook.js b/backend/src/routes/stripeWebhook.js
+index f0de915..408d45e 100644
+--- a/backend/src/routes/stripeWebhook.js
++++ b/backend/src/routes/stripeWebhook.js
+@@ -34,7 +34,7 @@ async function completeSetup(stripe, session) {
+     throw new Error("Checkout does not match the registration");
+   }
+ 
+-  if (registration.stripeSubscriptionStatus === "canceled") return;
++  if (registration.archivedAt || registration.stripeSubscriptionStatus === "canceled") return;
+   // A completed setup must never create another schedule.
+   if (registration.stripeScheduleId) return;
+ 
+@@ -141,7 +141,7 @@ async function completeSetup(stripe, session) {
+   const current = await prisma.consentForm.findUnique({
+     where: { id: registration.id },
+   });
+-  if (current.stripeSubscriptionStatus === "canceled") {
++  if (current.archivedAt || current.stripeSubscriptionStatus === "canceled") {
+     await stripe.subscriptionSchedules.cancel(schedule.id, {
+       invoice_now: false,
+       prorate: false,
+diff --git a/backend/src/services/retentionReview.js b/backend/src/services/retentionReview.js
+index 66f47a6..73b0484 100644
+--- a/backend/src/services/retentionReview.js
++++ b/backend/src/services/retentionReview.js
+@@ -1,38 +1,352 @@
+-const {DateTime}=require('luxon');
+-const zone='Europe/London';
+-function reviewRecord(record,now=new Date()){
+- const registered=DateTime.fromJSDate(new Date(record.createdAt),{zone});
+- const today=DateTime.fromJSDate(new Date(now),{zone});
+- const valid=registered.isValid&&registered.toMillis()<=today.toMillis();
+- const startYear=valid?(registered.month>=6?registered.year:registered.year-1):null;
+- const end=valid?DateTime.fromObject({year:startYear+1,month:5,day:31},{zone}).endOf('day'):null;
+- const proposedReview=end?.plus({years:1});
+- const state=!valid?'CHECK_REGISTRATION_DATE':today.toMillis()<=end.toMillis()?'CURRENT_INFERRED_SEASON':today.toMillis()<=proposedReview.toMillis()?'REVIEW_RENEWAL':'REVIEW_OLD_REGISTRATION';
+- return {
+-  id:record.id,playerFirstName:record.playerFirstName,playerSurname:record.playerSurname,
+-  team:record.wwfcTeam||null,registeredAt:record.createdAt,
+-  inferredSeason:startYear===null?null:`${startYear}/${String(startYear+1).slice(-2)}`,
+-  seasonEnd:end?.toISODate()||null,
+-  proposedArchiveReviewDate:proposedReview?.toISODate()||null,
+-  state,seasonBasis:'REGISTRATION_DATE_ONLY',renewalStatus:'UNCONFIRMED',
+-  billingReviewRequired:Boolean(record.stripeScheduleId||record.stripeSubscriptionId||record.stripeSubscriptionStatus),
+-  openInvoiceCount:record._count?.invoices||0,
+-  deletionEligible:false,
+- };
+-}
+-async function retentionReview(prisma,now=new Date()){
+- const records=await prisma.consentForm.findMany({
+-  select:{id:true,createdAt:true,playerFirstName:true,playerSurname:true,wwfcTeam:true,
+-   stripeScheduleId:true,stripeSubscriptionId:true,stripeSubscriptionStatus:true,
+-   _count:{select:{invoices:{where:{status:'open',amountRemainingPence:{gt:0}}}}}},
+-  orderBy:{createdAt:'asc'},
+- });
+- const members=records.map(record=>reviewRecord(record,now));
+- const counts={total:members.length,currentInferredSeason:0,reviewRenewal:0,reviewOldRegistration:0,checkRegistrationDate:0};
+- for(const member of members){const key={CURRENT_INFERRED_SEASON:'currentInferredSeason',REVIEW_RENEWAL:'reviewRenewal',REVIEW_OLD_REGISTRATION:'reviewOldRegistration',CHECK_REGISTRATION_DATE:'checkRegistrationDate'}[member.state];counts[key]++;}
+- return {generatedAt:new Date(now).toISOString(),timeZone:zone,seasonEnd:'31 May',proposedArchiveMonths:12,
+-  destructiveActionsEnabled:false,
+-  notice:'Read-only review. This report infers seasons from original registration dates only. Check confirmed renewals and departures in Seasons & renewals; they are not incorporated in this report yet. Archive dates and record holds require separate confirmation before retention decisions. The 12-month archive period is a proposal.',
+-  counts,members};
+-}
+-module.exports={reviewRecord,retentionReview};
++const { DateTime } = require("luxon");
++const zone = "Europe/London";
++const fail = (message, statusCode = 409) =>
++  Object.assign(new Error(message), { statusCode });
++const selection = {
++  id: true,
++  createdAt: true,
++  playerFirstName: true,
++  playerSurname: true,
++  wwfcTeam: true,
++  archivedAt: true,
++  archiveSeasonId: true,
++  archiveReason: true,
++  archiveReviewAt: true,
++  retentionHoldAt: true,
++  retentionHoldReason: true,
++  stripeCustomerId: true,
++  stripeScheduleId: true,
++  stripeSubscriptionId: true,
++  stripeSubscriptionStatus: true,
++  seasonMemberships: {
++    select: {
++      id: true,
++      state: true,
++      origin: true,
++      leftAt: true,
++      acceptedAt: true,
++      firstPaymentDate: true,
++      billingStatus: true,
++      stripeScheduleId: true,
++      stripeSubscriptionId: true,
++      season: {
++        select: { id: true, label: true, startsAt: true, endsAt: true },
++      },
++    },
++  },
++  _count: {
++    select: {
++      invoices: { where: { status: "open", amountRemainingPence: { gt: 0 } } },
++    },
++  },
++};
++function facts(record, now = new Date()) {
++  const confirmed = (record.seasonMemberships || [])
++    .filter(
++      (m) =>
++        (m.state === "ACCEPTED" || m.state === "LEFT") &&
++        (m.acceptedAt ||
++          m.firstPaymentDate ||
++          m.origin === "LEGACY_CONFIRMED_BY_ADMIN") &&
++        !(
++          m.state === "LEFT" &&
++          m.leftAt &&
++          new Date(m.leftAt) < new Date(m.season.startsAt)
++        ),
++    )
++    .sort((a, b) => new Date(b.season.endsAt) - new Date(a.season.endsAt));
++  const latest = confirmed[0];
++  const season = latest?.season;
++  // Stripe anchors use UTC 1st. Retention uses the agreed club season's UK calendar end.
++  const seasonEnd = season
++    ? DateTime.fromJSDate(new Date(season.endsAt), { zone: "UTC" })
++        .minus({ days: 1 })
++        .toISODate()
++    : null;
++  const end = seasonEnd
++    ? DateTime.fromISO(seasonEnd, { zone }).endOf("day")
++    : null;
++  const continuing = confirmed.some(
++    (m) =>
++      m.state === "ACCEPTED" && !m.leftAt && new Date(m.season.endsAt) > now,
++  );
++  const openInvoiceCount = record._count?.invoices || 0;
++  const blockers = [];
++  if (!season)
++    blockers.push(
++      "Confirm an actual membership season first; registration dates alone are insufficient.",
++    );
++  if (end && now <= end.toJSDate())
++    blockers.push("Keep the member until the end of their confirmed season.");
++  if (continuing)
++    blockers.push("A current or future accepted season membership remains.");
++  if (openInvoiceCount)
++    blockers.push(
++      "Resolve or separately review open invoices before archiving.",
++    );
++  if (record.archivedAt) blockers.push("Already archived.");
++  return { season, seasonEnd, end, continuing, openInvoiceCount, blockers };
++}
++function reviewRecord(record, now = new Date()) {
++  const f = facts(record, now);
++  const registered = DateTime.fromJSDate(new Date(record.createdAt), { zone });
++  const inferred = registered.isValid
++    ? registered.month >= 6
++      ? registered.year
++      : registered.year - 1
++    : null;
++  const state = record.archivedAt
++    ? "ARCHIVED"
++    : !f.season
++      ? "CONFIRM_SEASON"
++      : f.continuing
++        ? "CURRENT_OR_RENEWED"
++        : f.end && now <= f.end.toJSDate()
++          ? "RETAIN_TO_SEASON_END"
++          : "REVIEW_ARCHIVE";
++  return {
++    id: record.id,
++    playerFirstName: record.playerFirstName,
++    playerSurname: record.playerSurname,
++    team: record.wwfcTeam || null,
++    registeredAt: record.createdAt,
++    confirmedSeason: f.season?.label || null,
++    inferredSeason: inferred
++      ? `${inferred} / ${String(inferred + 1).slice(-2)}`
++      : null,
++    seasonBasis: f.season ? "CONFIRMED_MEMBERSHIP" : "REGISTRATION_DATE_ONLY",
++    seasonEnd: f.seasonEnd,
++    state,
++    renewalStatus: f.continuing
++      ? "CURRENT_OR_FUTURE_MEMBERSHIP"
++      : "NO_CURRENT_ACCEPTED_MEMBERSHIP",
++    openInvoiceCount: f.openInvoiceCount,
++    billingReviewRequired: Boolean(
++      record.stripeCustomerId ||
++      record.stripeScheduleId ||
++      record.stripeSubscriptionId,
++    ),
++    archiveEligible: f.blockers.length === 0,
++    archiveBlockers: f.blockers,
++    archivedAt: record.archivedAt || null,
++    archiveReason: record.archiveReason || null,
++    archiveReviewAt: record.archiveReviewAt || null,
++    archiveReviewDue: Boolean(
++      record.archivedAt &&
++      record.archiveReviewAt &&
++      new Date(record.archiveReviewAt) <= now,
++    ),
++    retentionHold: Boolean(record.retentionHoldAt),
++    retentionHoldReason: record.retentionHoldReason || null,
++    deletionEligible: false,
++  };
++}
++async function retentionReview(prisma, now = new Date()) {
++  const records = await prisma.consentForm.findMany({
++    select: selection,
++    orderBy: { createdAt: "asc" },
++  });
++  const members = records.map((r) => reviewRecord(r, now));
++  return {
++    generatedAt: now.toISOString(),
++    timeZone: zone,
++    seasonEnd: "31 May",
++    destructiveActionsEnabled: false,
++    notice:
++      "Confirmed season memberships drive this review. A proposed 12-month archive period is not an approved retention policy. Choose a justified review date for each archive; it is not a deletion date. Archives, holds and restore actions are supervised and logged. Permanent deletion is disabled.",
++    counts: {
++      total: members.length,
++      archiveCandidates: members.filter((m) => m.archiveEligible).length,
++      archived: members.filter((m) => m.archivedAt).length,
++      reviewDue: members.filter((m) => m.archiveReviewDue).length,
++      holds: members.filter((m) => m.retentionHold).length,
++    },
++    members,
++  };
++}
++async function assertBillingStopped(stripe, r) {
++  if (!r.stripeCustomerId) {
++    if (r.stripeScheduleId || r.stripeSubscriptionId)
++      throw fail("Billing references require manual review");
++    return;
++  }
++  const customer = await stripe.customers.retrieve(r.stripeCustomerId);
++  if (
++    customer.deleted ||
++    customer.livemode ||
++    customer.metadata?.registrationId !== r.id
++  )
++    throw fail("Stripe customer ownership must be reviewed");
++  for (const [type, list, params] of [
++    ["schedule", (p) => stripe.subscriptionSchedules.list(p), {}],
++    ["subscription", (p) => stripe.subscriptions.list(p), { status: "all" }],
++  ]) {
++    let cursor;
++    let finished = false;
++    for (let page = 0; page < 10; page++) {
++      const result = await list({
++        customer: r.stripeCustomerId,
++        limit: 100,
++        ...params,
++        ...(cursor ? { starting_after: cursor } : {}),
++      });
++      const terminal =
++        type === "schedule"
++          ? ["canceled", "completed", "released"]
++          : ["canceled", "incomplete_expired"];
++      if (result.data.some((o) => !terminal.includes(o.status)))
++        throw fail("Stop all current and future Stripe plans before archiving");
++      if (!result.has_more) {
++        finished = true;
++        break;
++      }
++      cursor = result.data.at(-1)?.id;
++    }
++    if (!finished) throw fail("Billing history requires manual review");
++  }
++}
++async function archive(
++  prisma,
++  stripe,
++  registrationId,
++  actor,
++  input,
++  now = new Date(),
++) {
++  const r = await prisma.consentForm.findUnique({
++    where: { id: registrationId },
++    select: selection,
++  });
++  if (!r) throw fail("Member not found", 404);
++  const f = facts(r, now);
++  if (f.blockers.length) throw fail(f.blockers.join(" "));
++  const review = DateTime.fromISO(input.reviewDate, { zone }).endOf("day");
++  if (!review.isValid || review.toMillis() <= now.getTime())
++    throw fail("Choose a future archive review date", 400);
++  await assertBillingStopped(
++    r.stripeCustomerId && typeof stripe === "function" ? stripe() : stripe,
++    r,
++  );
++  await prisma.$transaction(
++    async (tx) => {
++      const current = await tx.consentForm.findUnique({
++        where: { id: registrationId },
++        select: selection,
++      });
++      if (!current) throw fail("Member not found", 404);
++      const currentFacts = facts(current, now);
++      if (currentFacts.blockers.length)
++        throw fail(currentFacts.blockers.join(" "));
++      const changed = await tx.consentForm.updateMany({
++        where: { id: registrationId, archivedAt: null },
++        data: {
++          archivedAt: now,
++          archiveSeasonId: currentFacts.season.id,
++          archiveReason: input.reason,
++          archiveReviewAt: review.toJSDate(),
++        },
++      });
++      if (!changed.count) throw fail("Member changed; refresh the review");
++      await tx.seasonMembership.updateMany({
++        where: { registrationId },
++        data: { tokenHash: null, tokenExpiresAt: null },
++      });
++      await tx.memberRetentionAudit.create({
++        data: {
++          actor,
++          registrationId,
++          action: "ARCHIVED",
++          details: {
++            seasonId: currentFacts.season.id,
++            reason: input.reason,
++            reviewDate: input.reviewDate,
++            billingVerifiedAt: now.toISOString(),
++          },
++        },
++      });
++    },
++    { isolationLevel: "Serializable" },
++  );
++}
++async function restore(prisma, registrationId, actor, reason) {
++  await prisma.$transaction(
++    async (tx) => {
++      const changed = await tx.consentForm.updateMany({
++        where: { id: registrationId, archivedAt: { not: null } },
++        data: {
++          archivedAt: null,
++          archiveSeasonId: null,
++          archiveReason: null,
++          archiveReviewAt: null,
++        },
++      });
++      if (!changed.count) throw fail("Archived member not found", 404);
++      await tx.memberRetentionAudit.create({
++        data: {
++          actor,
++          registrationId,
++          action: "RESTORED",
++          details: { reason },
++        },
++      });
++    },
++    { isolationLevel: "Serializable" },
++  );
++}
++async function hold(prisma, registrationId, actor, enabled, reason) {
++  await prisma.$transaction(
++    async (tx) => {
++      const changed = await tx.consentForm.updateMany({
++        where: { id: registrationId },
++        data: {
++          retentionHoldAt: enabled ? new Date() : null,
++          retentionHoldReason: enabled ? reason : null,
++        },
++      });
++      if (!changed.count) throw fail("Member not found", 404);
++      await tx.memberRetentionAudit.create({
++        data: {
++          actor,
++          registrationId,
++          action: enabled ? "HOLD_SET" : "HOLD_RELEASED",
++          details: { reason },
++        },
++      });
++    },
++    { isolationLevel: "Serializable" },
++  );
++}
++async function review(prisma, registrationId, actor, input, now = new Date()) {
++  const review = DateTime.fromISO(input.reviewDate, { zone }).endOf("day");
++  if (!review.isValid || review.toMillis() <= now.getTime())
++    throw fail("Choose a future review date", 400);
++  await prisma.$transaction(
++    async (tx) => {
++      const changed = await tx.consentForm.updateMany({
++        where: { id: registrationId, archivedAt: { not: null } },
++        data: { archiveReviewAt: review.toJSDate() },
++      });
++      if (!changed.count) throw fail("Archived member not found", 404);
++      await tx.memberRetentionAudit.create({
++        data: {
++          actor,
++          registrationId,
++          action: "ARCHIVE_REVIEWED",
++          details: { reason: input.reason, nextReviewDate: input.reviewDate },
++        },
++      });
++    },
++    { isolationLevel: "Serializable" },
++  );
++}
++module.exports = {
++  review,
++  selection,
++  facts,
++  reviewRecord,
++  retentionReview,
++  assertBillingStopped,
++  archive,
++  restore,
++  hold,
++};
+diff --git a/backend/src/services/seasons.js b/backend/src/services/seasons.js
+index c032a11..062c25c 100644
+--- a/backend/src/services/seasons.js
++++ b/backend/src/services/seasons.js
+@@ -174,7 +174,7 @@ async function checkout(membershipId) {
+     where: { id: membershipId },
+     include,
+   });
+-  if (!m || m.state !== "ACCEPTED" || m.leftAt)
++  if (!m || m.registration.archivedAt || m.state !== "ACCEPTED" || m.leftAt)
+     throw fail("This season membership is not ready for payment setup");
+   if (m.stripeScheduleId || m.stripeSubscriptionId) return null;
+   const stripe = getStripe();
+@@ -278,7 +278,7 @@ async function completeSetup(stripe, session) {
+   )
+     throw fail("Season checkout mismatch");
+   own(session, m.registration);
+-  if (m.state !== "ACCEPTED" || m.leftAt) return true;
++  if (m.registration.archivedAt || m.state !== "ACCEPTED" || m.leftAt) return true;
+   if (m.stripeScheduleId) {
+     const schedule = await stripe.subscriptionSchedules.retrieve(
+       m.stripeScheduleId,
+@@ -496,6 +496,7 @@ async function leaveAll(registrationId, actor) {
+     where: { id: registrationId },
+   });
+   if (!registration) throw fail("Member not found", 404);
++  if(registration.archivedAt)throw fail("Restore and review this archived record before membership actions",403);
+   const items = await prisma.$transaction(async (tx) => {
+     const rows = await tx.seasonMembership.findMany({
+       where: { registrationId },
+diff --git a/backend/src/services/stripeService.js b/backend/src/services/stripeService.js
+index 54859fb..add116d 100644
+--- a/backend/src/services/stripeService.js
++++ b/backend/src/services/stripeService.js
+@@ -27,6 +27,7 @@ async function createRegistrationCheckout(registration) {
+     error.statusCode = 404;
+     throw error;
+   }
++  if(registration.archivedAt)throw setupConflict("This member is archived; restore and review before payment setup");
+   const membership = await prisma.seasonMembership.findFirst({
+     where: { registrationId: registration.id, state: "ACCEPTED", leftAt: null },
+     orderBy: { firstPaymentDate: "desc" },
+diff --git a/tests/retention-access.cjs b/tests/retention-access.cjs
+new file mode 100644
+index 0000000..bf17f06
+--- /dev/null
++++ b/tests/retention-access.cjs
+@@ -0,0 +1,251 @@
++const { test } = require("node:test");
++const assert = require("node:assert/strict");
++const fs = require("node:fs");
++const vm = require("node:vm");
++const path = require("node:path");
++const { createRequire } = require("node:module");
++const req = createRequire(path.resolve(__dirname, "../backend/package.json"));
++const express = req("express");
++const jwt = req("jsonwebtoken");
++const crypto = require("node:crypto");
++process.env.TRUDASH_MEMBERSHIP_SHARED_SECRET =
++  "test-only-shared-secret-at-least-thirty-two-bytes";
++function db() {
++  const rows = [
++    {
++      id: "active",
++      ageGroup: "u9",
++      playerSex: "Female",
++      createdAt: new Date("2026-10-01"),
++      playerFirstName: "Visible",
++      playerSurname: "Member",
++      medicalInfo: "ACTIVE_HEALTH",
++      allergies: "",
++      invoices: [],
++      seasonMemberships: [],
++      _count: { invoices: 0 },
++      archivedAt: null,
++    },
++    {
++      id: "archived",
++      ageGroup: "u9",
++      playerSex: "Female",
++      createdAt: new Date("2025-10-01"),
++      playerFirstName: "ARCHIVE_NAME_CANARY",
++      playerSurname: "Member",
++      medicalInfo: "ARCHIVE_HEALTH_CANARY",
++      invoices: [],
++      seasonMemberships: [],
++      _count: { invoices: 0 },
++      archivedAt: new Date("2026-07-01"),
++    },
++    {
++      id: "held",
++      ageGroup: "u9",
++      createdAt: new Date("2025-10-01"),
++      retentionHoldAt: new Date(),
++      archivedAt: null,
++      invoices: [],
++      seasonMemberships: [],
++      _count: { invoices: 0 },
++    },
++  ];
++  const log = [];
++  const d = {
++    consentForm: {
++      findMany: async (q) =>
++        q?.where?.archivedAt === null
++          ? rows.filter((r) => !r.archivedAt)
++          : rows,
++      findUnique: async (q) => rows.find((r) => r.id === q.where.id),
++      updateMany: async (q) => {
++        const r = rows.find((r) => r.id === q.where.id);
++        if (!r) return { count: 0 };
++        Object.assign(r, q.data);
++        return { count: 1 };
++      },
++    },
++    seasonMembership: { count: async () => 0 },
++    membershipInvoice: { findMany: async () => [] },
++    memberRetentionAudit: { create: async (q) => log.push(q.data) },
++    reportExportAudit: { create: async () => {} },
++  };
++  d.$transaction = (fn) => fn(d);
++  return { d, rows, log };
++}
++function load(relative, d, access) {
++  const mod = { exports: {} };
++  const src = path.resolve(__dirname, "../backend/src", relative);
++  vm.runInNewContext(
++    fs.readFileSync(src, "utf8"),
++    {
++      module: mod,
++      exports: mod.exports,
++      process,
++      Date,
++      Buffer,
++      URL,
++      console,
++      require: (name) =>
++        name === "../prisma"
++          ? d
++          : name === "../services/applicationPermissions"
++            ? { applicationAccess: async () => access }
++            : name === "./retention"
++              ? load("routes/retention.js", d, access)
++              : name.startsWith("../")
++                ? req("./src/" + path.normalize(path.join("routes", name)))
++                : req(name),
++    },
++    { filename: src },
++  );
++  return mod.exports;
++}
++function token(method, p, body) {
++  return jwt.sign(
++    {
++      sub: "tester@wwfc.org.uk",
++      role: "membership_admin",
++      scope: "members",
++      method,
++      path: p,
++      bodyHash: crypto
++        .createHash("sha256")
++        .update(JSON.stringify(body || null))
++        .digest("hex"),
++      jti: crypto.randomUUID(),
++    },
++    process.env.TRUDASH_MEMBERSHIP_SHARED_SECRET,
++    {
++      algorithm: "HS256",
++      issuer: "trudash",
++      audience: "tcm-membership-admin",
++      expiresIn: 30,
++    },
++  );
++}
++async function run(access, fn) {
++  const { d, rows, log } = db();
++  const app = express();
++  app.use(express.json());
++  app.use("/api/admin", load("routes/admin.js", d, access));
++  const server = app.listen(0, "127.0.0.1");
++  await new Promise((r) => server.once("listening", r));
++  async function request(p, method = "GET", body) {
++    const route = "/api/admin" + p;
++    return fetch(`http://127.0.0.1:${server.address().port}${route}`, {
++      method,
++      headers: {
++        "x-trudash-assertion": token(method, route, body),
++        "Content-Type": "application/json",
++      },
++      ...(body ? { body: JSON.stringify(body) } : {}),
++    });
++  }
++  try {
++    await fn(request, rows, log);
++  } finally {
++    server.closeAllConnections();
++    await new Promise((r) => server.close(r));
++  }
++}
++const manager = {
++  permissions: ["MEMBERS_MANAGE", "FULL_CSV_EXPORT"],
++  superAdmin: false,
++};
++test("ordinary directory and registration JSON exclude archives and health values", async () => {
++  await run(manager, async (request) => {
++    for (const p of ["/members", "/registrations"]) {
++      const r = await request(p);
++      assert.equal(r.status, 200);
++      const text = await r.text();
++      assert.ok(text.includes("Visible"));
++      assert.equal(text.includes("ARCHIVE_NAME_CANARY"), false);
++      assert.equal(text.includes("ACTIVE_HEALTH"), false);
++    }
++  });
++});
++test("normal full CSV excludes archive even for an export-permitted manager", async () => {
++  await run(manager, async (request) => {
++    const r = await request("/registrations.csv");
++    assert.equal(r.status, 200);
++    const text = await r.text();
++    assert.ok(text.includes("ACTIVE_HEALTH"));
++    assert.equal(text.includes("ARCHIVE_HEALTH_CANARY"), false);
++  });
++});
++test("knowing an archived ID does not grant invoice access to a manager", async () => {
++  await run(manager, async (request) => {
++    assert.equal(
++      (await request("/registrations/archived/invoices")).status,
++      403,
++    );
++  });
++});
++test("archive review and mutations require Super Admin as well as member management", async () => {
++  await run(manager, async (request) => {
++    assert.equal((await request("/retention-review")).status, 403);
++    for (const action of ["archive", "restore", "hold", "review"])
++      assert.equal(
++        (
++          await request(`/retention/active/${action}`, "POST", {
++            confirm: true,
++          })
++        ).status,
++        403,
++      );
++  });
++});
++test("even a Super Admin cannot delete a held or archived record", async () => {
++  await run({ ...manager, superAdmin: true }, async (request) => {
++    for (const id of ["archived", "held"])
++      assert.equal(
++        (await request(`/registrations/${id}`, "DELETE", { confirm: true }))
++          .status,
++        409,
++      );
++  });
++});
++test("Super Admin archive invoice access is audited before release", async () => {
++  await run({ ...manager, superAdmin: true }, async (request, rows, log) => {
++    assert.equal(
++      (await request("/registrations/archived/invoices")).status,
++      200,
++    );
++    assert.equal(log[0].action, "ARCHIVED_INVOICES_ACCESSED");
++  });
++});
++test("retention review lists restricted metadata without stored health declarations", async () => {
++  await run({ ...manager, superAdmin: true }, async (request) => {
++    const r = await request("/retention-review");
++    assert.equal(r.status, 200);
++    const text = await r.text();
++    assert.ok(text.includes("ARCHIVE_NAME_CANARY"));
++    assert.equal(text.includes("ARCHIVE_HEALTH_CANARY"), false);
++  });
++});
++test("archive request needs explicit non-renewal confirmation and review date", async () => {
++  await run({ ...manager, superAdmin: true }, async (request) => {
++    assert.equal(
++      (await request("/retention/active/archive", "POST", { confirm: true }))
++        .status,
++      400,
++    );
++  });
++});
++test("hold action persists an audit using the signed-in identity", async () => {
++  await run({ ...manager, superAdmin: true }, async (request, rows, log) => {
++    assert.equal(
++      (
++        await request("/retention/active/hold", "POST", {
++          confirm: true,
++          enabled: true,
++          reason: "Legal case reference 123",
++        })
++      ).status,
++      200,
++    );
++    assert.equal(log[0].action, "HOLD_SET");
++    assert.equal(log[0].actor, "tester@wwfc.org.uk");
++  });
++});
+diff --git a/tests/retention.cjs b/tests/retention.cjs
+new file mode 100644
+index 0000000..df13408
+--- /dev/null
++++ b/tests/retention.cjs
+@@ -0,0 +1,295 @@
++const { test } = require("node:test");
++const assert = require("node:assert/strict");
++const service = require("../backend/src/services/retentionReview");
++const now = new Date("2026-10-15T12:00:00Z");
++function record() {
++  return {
++    id: "member",
++    createdAt: new Date("2025-07-01"),
++    playerFirstName: "Archive",
++    playerSurname: "Fixture",
++    wwfcTeam: "Test",
++    archivedAt: null,
++    archiveReviewAt: null,
++    retentionHoldAt: null,
++    stripeCustomerId: null,
++    _count: { invoices: 0 },
++    seasonMemberships: [
++      {
++        id: "membership",
++        state: "ACCEPTED",
++        origin: "NEW_REGISTRATION",
++        acceptedAt: new Date("2025-07-01"),
++        firstPaymentDate: new Date("2025-08-01"),
++        season: {
++          id: "season",
++          label: "2025 / 26",
++          startsAt: new Date("2025-06-01"),
++          endsAt: new Date("2026-06-01"),
++        },
++      },
++    ],
++  };
++}
++function dbFor(original) {
++  const state = {
++    record: structuredClone(original),
++    audit: [],
++    tokensValid: true,
++  };
++  const db = {
++    consentForm: {
++      findUnique: async () => structuredClone(state.record),
++      updateMany: async ({ where, data }) => {
++        if (where.archivedAt?.not === null && !state.record.archivedAt)
++          return { count: 0 };
++        if (where.archivedAt === null && state.record.archivedAt)
++          return { count: 0 };
++        Object.assign(state.record, data);
++        return { count: 1 };
++      },
++    },
++    seasonMembership: {
++      updateMany: async () => {
++        state.tokensValid = false;
++        return { count: 1 };
++      },
++    },
++    memberRetentionAudit: {
++      create: async (q) => {
++        state.audit.push(q.data);
++      },
++    },
++  };
++  db.$transaction = async (fn) => {
++    const before = structuredClone(state);
++    try {
++      return await fn(db);
++    } catch (e) {
++      Object.assign(state, before);
++      throw e;
++    }
++  };
++  return { db, state };
++}
++const input = {
++  reason: "Season ended; non-renewal confirmed",
++  reviewDate: "2027-05-31",
++};
++test("real season membership overrides a newer original registration estimate", () => {
++  const r = record();
++  r.createdAt = new Date("2026-10-01");
++  const m = service.reviewRecord(r, now);
++  assert.equal(m.confirmedSeason, "2025 / 26");
++  assert.equal(m.seasonEnd, "2026-05-31");
++  assert.equal(m.archiveEligible, true);
++  assert.equal(m.deletionEligible, false);
++});
++test("registration date alone never authorises archive", () => {
++  const r = record();
++  r.seasonMemberships = [];
++  assert.equal(service.reviewRecord(r, now).archiveEligible, false);
++});
++test("current-season member and midseason leaver are retained until May ends", () => {
++  for (const state of ["ACCEPTED", "LEFT"]) {
++    const r = record();
++    const m = r.seasonMemberships[0];
++    m.season.startsAt = new Date("2026-06-01");
++    m.season.endsAt = new Date("2027-06-01");
++    m.state = state;
++    m.leftAt = state === "LEFT" ? new Date("2026-09-01") : null;
++    assert.equal(service.reviewRecord(r, now).archiveEligible, false);
++  }
++});
++test("future accepted renewal prevents archiving an old season", () => {
++  const r = record();
++  r.seasonMemberships.push({
++    state: "ACCEPTED",
++    acceptedAt: now,
++    season: {
++      id: "next",
++      label: "2027 / 28",
++      startsAt: new Date("2027-06-01"),
++      endsAt: new Date("2028-06-01"),
++    },
++  });
++  assert.equal(service.reviewRecord(r, now).archiveEligible, false);
++});
++test("a cancelled renewal before it starts does not extend actual membership", () => {
++  const r = record();
++  r.seasonMemberships.push({
++    state: "LEFT",
++    acceptedAt: now,
++    leftAt: now,
++    season: {
++      id: "next",
++      label: "2027 / 28",
++      startsAt: new Date("2027-06-01"),
++      endsAt: new Date("2028-06-01"),
++    },
++  });
++  assert.equal(service.reviewRecord(r, now).confirmedSeason, "2025 / 26");
++  assert.equal(service.reviewRecord(r, now).archiveEligible, true);
++});
++test("unaccepted offered renewal marked left is not proof of a season", () => {
++  const r = record();
++  r.seasonMemberships = [
++    {
++      state: "LEFT",
++      origin: "RENEWAL",
++      leftAt: now,
++      season: {
++        label: "2025 / 26",
++        startsAt: new Date("2025-06-01"),
++        endsAt: new Date("2026-06-01"),
++      },
++    },
++  ];
++  assert.equal(service.reviewRecord(r, now).archiveEligible, false);
++});
++test("open invoices block archiving", async () => {
++  const r = record();
++  r._count.invoices = 1;
++  const { db } = dbFor(r);
++  await assert.rejects(
++    service.archive(db, {}, r.id, "chair", input, now),
++    /open invoices/,
++  );
++});
++test("archive is transactional, removes token access and records metadata while preserving hold", async () => {
++  const r = record();
++  r.retentionHoldAt = now;
++  r.retentionHoldReason = "Case reference 123";
++  const { db, state } = dbFor(r);
++  await service.archive(
++    db,
++    () => {
++      throw Error("No Stripe needed");
++    },
++    r.id,
++    "chair",
++    input,
++    now,
++  );
++  assert.equal(state.record.archivedAt.toISOString(), now.toISOString());
++  assert.equal(
++    state.record.archiveReviewAt.toISOString(),
++    "2027-05-31T22:59:59.999Z",
++  );
++  assert.equal(state.tokensValid, false);
++  assert.equal(state.record.retentionHoldReason, "Case reference 123");
++  assert.equal(state.audit[0].action, "ARCHIVED");
++});
++test("audit failure rolls back archive and token invalidation", async () => {
++  const r = record();
++  const { db, state } = dbFor(r);
++  db.memberRetentionAudit.create = async () => {
++    throw Error("audit unavailable");
++  };
++  await assert.rejects(
++    service.archive(db, {}, r.id, "chair", input, now),
++    /audit unavailable/,
++  );
++  assert.equal(state.record.archivedAt, null);
++  assert.equal(state.tokensValid, true);
++});
++test("review date must be valid and in the future", async () => {
++  for (const reviewDate of ["2026-02-31", "2026-09-01"]) {
++    const r = record();
++    const { db } = dbFor(r);
++    await assert.rejects(
++      service.archive(db, {}, r.id, "chair", { ...input, reviewDate }, now),
++      /future archive review/,
++    );
++  }
++});
++test("restore preserves hold and does not restart billing or tokens", async () => {
++  const r = record();
++  r.archivedAt = now;
++  r.retentionHoldAt = now;
++  const { db, state } = dbFor(r);
++  state.tokensValid = false;
++  await service.restore(db, r.id, "chair", "Correcting archive decision");
++  assert.equal(state.record.archivedAt, null);
++  assert.ok(state.record.retentionHoldAt);
++  assert.equal(state.tokensValid, false);
++  assert.equal(state.record.stripeCustomerId, null);
++  assert.equal(state.audit[0].action, "RESTORED");
++});
++test("reviewing continued retention records a future review and leaves member archived", async () => {
++  const r = record();
++  r.archivedAt = now;
++  const { db, state } = dbFor(r);
++  await service.review(
++    db,
++    r.id,
++    "chair",
++    { ...input, reason: "Required for case reference 123" },
++    now,
++  );
++  assert.ok(state.record.archivedAt);
++  assert.equal(state.audit[0].action, "ARCHIVE_REVIEWED");
++});
++test("hold release requires an audit and preserves member record", async () => {
++  const r = record();
++  const { db, state } = dbFor(r);
++  await service.hold(db, r.id, "chair", true, "Case reference 123");
++  assert.ok(state.record.retentionHoldAt);
++  await service.hold(db, r.id, "chair", false, "Case reference 123 resolved");
++  assert.equal(state.record.retentionHoldAt, null);
++  assert.equal(state.audit.length, 2);
++});
++function stripeWith(schedules = [], subs = []) {
++  return {
++    customers: {
++      retrieve: async () => ({
++        livemode: false,
++        metadata: { registrationId: "member" },
++      }),
++    },
++    subscriptionSchedules: {
++      list: async () => ({ data: schedules, has_more: false }),
++    },
++    subscriptions: { list: async () => ({ data: subs, has_more: false }) },
++  };
++}
++test("live Stripe check rejects active schedules despite stale cancelled DB status", async () => {
++  const r = record();
++  r.stripeCustomerId = "cus";
++  r.stripeSubscriptionStatus = "canceled";
++  await assert.rejects(
++    service.assertBillingStopped(stripeWith([{ status: "not_started" }]), r),
++    /Stop all/,
++  );
++});
++test("released schedule is insufficient when its subscription still runs", async () => {
++  const r = record();
++  r.stripeCustomerId = "cus";
++  await assert.rejects(
++    service.assertBillingStopped(
++      stripeWith([{ status: "released" }], [{ status: "active" }]),
++      r,
++    ),
++    /Stop all/,
++  );
++});
++test("only cancelled or completed billing passes live verification", async () => {
++  const r = record();
++  r.stripeCustomerId = "cus";
++  await service.assertBillingStopped(
++    stripeWith(
++      [{ status: "released" }, { status: "completed" }],
++      [{ status: "canceled" }],
++    ),
++    r,
++  );
++});
++test("retention API projection excludes health, contact and Stripe identifiers", () => {
++  const r = record();
++  r.medicalInfo = "HEALTH_CANARY";
++  r.emergencyContact1 = { email: "PRIVATE_CANARY" };
++  r.stripeCustomerId = "cus_CANARY";
++  const m = JSON.stringify(service.reviewRecord(r, now));
++  for (const key of ["HEALTH_CANARY", "PRIVATE_CANARY", "cus_CANARY"])
++    assert.equal(m.includes(key), false);
++});
+diff --git a/tests/season-routes.cjs b/tests/season-routes.cjs
+index 441f637..9055d8f 100644
+--- a/tests/season-routes.cjs
++++ b/tests/season-routes.cjs
+@@ -239,7 +239,11 @@ const validRenewal = {
+ };
+ test("already accepted renewal cannot be submitted a second time", async () => {
+   await withApp(
+-    { seasonMembership: { findFirst: async () => ({ state: "ACCEPTED" }) } },
++    {
++      seasonMembership: {
++        findFirst: async () => ({ state: "ACCEPTED", registration: {} }),
++      },
++    },
+     {},
+     async (base) => {
+       const r = await fetch(base + "/api/seasons/renew/" + "b".repeat(64), {
+diff --git a/tests/seasons.cjs b/tests/seasons.cjs
+index 0c25bb6..57e09d7 100644
+--- a/tests/seasons.cjs
++++ b/tests/seasons.cjs
+@@ -453,3 +453,4 @@ test("season conversion never extends an existing earlier cancellation date", as
+   );
+   assert.equal(f.calls.length, 0);
+ });
++test('archived member cannot start payment setup or create billing from a delayed completed session',async()=>{const f=fixture();f.m.registration.archivedAt=new Date();await assert.rejects(f.service.checkout(f.m.id),/not ready/);assert.equal(await f.service.completeSetup(f.stripe,f.session),true);assert.equal(f.calls.length,0);});

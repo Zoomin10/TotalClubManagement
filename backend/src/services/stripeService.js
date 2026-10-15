@@ -27,6 +27,7 @@ async function createRegistrationCheckout(registration) {
     error.statusCode = 404;
     throw error;
   }
+  if(registration.archivedAt)throw setupConflict("This member is archived; restore and review before payment setup");
   const membership = await prisma.seasonMembership.findFirst({
     where: { registrationId: registration.id, state: "ACCEPTED", leftAt: null },
     orderBy: { firstPaymentDate: "desc" },

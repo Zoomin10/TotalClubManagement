@@ -53,6 +53,12 @@ model ConsentForm {
 
   // Subscription state; separate from successful payment history
   stripeSubscriptionStatus String?
+  archivedAt               DateTime?
+  archiveSeasonId          String?
+  archiveReason            String?
+  archiveReviewAt          DateTime?
+  retentionHoldAt          DateTime?
+  retentionHoldReason      String?
   seasonMemberships        SeasonMembership[]
   invoices                 MembershipInvoice[]
 }
@@ -230,4 +236,16 @@ model SeasonChange {
   details        Json
 
   @@index([createdAt])
+}
+
+// Metadata-only record of supervised retention actions; no medical values or tokens.
+model MemberRetentionAudit {
+  id             String   @id @default(cuid())
+  createdAt      DateTime @default(now())
+  actor          String
+  registrationId String
+  action         String
+  details        Json
+
+  @@index([registrationId, createdAt])
 }

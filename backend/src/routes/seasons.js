@@ -71,7 +71,7 @@ const safeContact = (c) =>
 router.get("/renew/:token", async (req, res) => {
   try {
     const m = await tokenMembership(req.params.token);
-    if (!m || m.leftAt)
+    if (!m || m.leftAt || m.registration.archivedAt)
       throw service.fail("This renewal link is unavailable or expired", 404);
     if (m.state === "ACCEPTED")
       return res.json({
@@ -141,7 +141,7 @@ router.post("/renew/:token", async (req, res) => {
       });
     const d = parsed.data;
     const m = await tokenMembership(req.params.token);
-    if (!m || m.leftAt) throw service.fail("Renewal link unavailable", 404);
+    if (!m || m.leftAt || m.registration.archivedAt) throw service.fail("Renewal link unavailable", 404);
     if (m.state !== "OFFERED")
       throw service.fail("Renewal already accepted. Use Resume payment setup.");
     if (m.season.status !== "PUBLISHED" || m.season.startsAt <= new Date())
@@ -182,8 +182,8 @@ router.post("/renew/:token", async (req, res) => {
         });
         if (!claimed.count)
           throw service.fail("Renewal changed or already accepted");
-        await tx.consentForm.update({
-          where: { id: m.registrationId },
+        const updated=await tx.consentForm.updateMany({
+          where: { id: m.registrationId, archivedAt:null },
           data: {
             emergencyContact1: {
               ...m.registration.emergencyContact1,
@@ -204,6 +204,7 @@ router.post("/renew/:token", async (req, res) => {
             signatureDate: new Date(),
           },
         });
+        if(!updated.count)throw service.fail("This membership is archived. Contact the club.");
         await tx.seasonChange.create({
           data: {
             actor: "parent-renewal",
@@ -267,6 +268,7 @@ router.get("/admin", async (req, res) => {
       orderBy: { startYear: "desc" },
     });
     const memberships = await prisma.seasonMembership.findMany({
+      where:{registration:{archivedAt:null}},
       select: {
         id: true,
         seasonId: true,
@@ -332,7 +334,7 @@ router.post("/admin", async (req, res) => {
       const s = await tx.clubSeason.create({
         data: {
           startYear: d.startYear,
-          label: `${d.startYear}/${String(d.startYear + 1).slice(-2)}`,
+          label: `${d.startYear} / ${String(d.startYear + 1).slice(-2)}`,
           ...service.dates(d.startYear),
           termsVersion: d.termsVersion,
           termsContent: d.termsContent,
@@ -399,7 +401,7 @@ router.post(
       const r = await prisma.consentForm.findUnique({
         where: { id: req.params.registrationId },
       });
-      if (!r) throw service.fail("Member not found", 404);
+      if (!r || r.archivedAt) throw service.fail("Active member not found", 404);
       const token = crypto.randomBytes(32).toString("hex");
       const m = await prisma.$transaction(async (tx) => {
         const existing = await tx.seasonMembership.findUnique({
@@ -459,7 +461,7 @@ router.post(
       const r = await prisma.consentForm.findUnique({
         where: { id: req.params.registrationId },
       });
-      if (!s || !r || s.startsAt > new Date())
+      if (!s || !r || r.archivedAt || s.startsAt > new Date())
         throw service.fail("Choose this member’s current season");
       res.json(await service.endLegacy(r, s, req.trudashAdmin.username));
     } catch (e) {

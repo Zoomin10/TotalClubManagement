@@ -19,6 +19,15 @@ async function requireAdmin(req, res, next) {
         if (!access.permissions.includes("MEMBERS_MANAGE")) return res.status(403).json({error:"Membership administrator access required"});
         req.trudashAdmin.fullCsvExport = access.permissions.includes("FULL_CSV_EXPORT");
         req.applicationAccess = access;
+        const target=/^\/registrations\/([A-Za-z0-9_-]+)(?:\/|$)/.exec(req.path);
+        if(target){
+          const record=await prisma.consentForm.findUnique({where:{id:target[1]},select:{archivedAt:true,retentionHoldAt:true}});
+          if(req.method==="DELETE"&&(record?.archivedAt||record?.retentionHoldAt))return res.status(409).json({error:"Archived or held records cannot be deleted"});
+          if(record?.archivedAt){
+            if(!access.superAdmin||req.method!=="GET")return res.status(403).json({error:"This record is archived; supervised archive access is required"});
+            await prisma.memberRetentionAudit.create({data:{actor:req.trudashAdmin.username,registrationId:target[1],action:"ARCHIVED_INVOICES_ACCESSED",details:{}}});
+          }
+        }
         return next();
       } catch { return res.status(503).json({error:"Membership permissions could not be checked"}); }
     }
@@ -53,7 +62,7 @@ function isDevelopmentAge(ageGroup) {
 
 router.get("/dashboard", requireAdmin, async (req, res) => {
   try {
-    const forms = await prisma.consentForm.findMany();
+    const forms = await prisma.consentForm.findMany({where:{archivedAt:null},select:{ageGroup:true,playerSex:true}});
 
     const total = forms.length;
     const boys = forms.filter((f) => f.playerSex === "Male").length;
@@ -77,7 +86,9 @@ router.get("/registrations", requireAdmin, async (req, res) => {
     const { ageGroup, wwfcTeam, playerSex } = req.query;
 
     const registrations = await prisma.consentForm.findMany({
+      select:memberSelect,
       where: {
+        archivedAt:null,
         ageGroup: ageGroup || undefined,
         wwfcTeam: wwfcTeam || undefined,
         playerSex: playerSex || undefined,
@@ -230,6 +241,7 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
       const current = await tx.consentForm.findUnique({
         where: { id: registration.id },
       });
+      if(current?.archivedAt||current?.retentionHoldAt){const error=new Error("Archived or held records cannot be deleted");error.statusCode=409;throw error;}
 
       if (!current) {
         const error = new Error("Member not found");
@@ -256,9 +268,10 @@ router.delete("/registrations/:id", requireAdmin, async (req, res) => {
         where: { registrationId: registration.id },
       });
 
-      await tx.consentForm.delete({
-        where: { id: registration.id },
+      const removed=await tx.consentForm.deleteMany({
+        where: { id: registration.id,archivedAt:null,retentionHoldAt:null },
       });
+      if(!removed.count){const error=new Error("Record was archived or placed on hold; deletion stopped");error.statusCode=409;throw error;}
     });
 
     res.json({ success: true });
@@ -280,6 +293,7 @@ router.get("/registrations.csv", requireAdmin, async (req, res) => {
   }
   try {
     const forms = await prisma.consentForm.findMany({
+      where:{archivedAt:null},
       orderBy: { createdAt: "desc" },
     });
     
@@ -673,6 +687,7 @@ router.get("/retention-review", requireAdmin, async(req,res)=>{
 router.get("/members", requireAdmin, async (req, res) => {
   try {
     const registrations = await prisma.consentForm.findMany({
+      where:{archivedAt:null},
       orderBy: { createdAt: "desc" },
       select: {
         ...memberSelect,
@@ -738,4 +753,5 @@ router.post("/registrations/:id/payment-setup", requireAdmin, async (req, res) =
   }
 });
 
+router.use("/retention",requireAdmin,require("./retention"));
 module.exports = router;

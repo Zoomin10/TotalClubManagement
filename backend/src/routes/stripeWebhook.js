@@ -34,7 +34,7 @@ async function completeSetup(stripe, session) {
     throw new Error("Checkout does not match the registration");
   }
 
-  if (registration.stripeSubscriptionStatus === "canceled") return;
+  if (registration.archivedAt || registration.stripeSubscriptionStatus === "canceled") return;
   // A completed setup must never create another schedule.
   if (registration.stripeScheduleId) return;
 
@@ -141,7 +141,7 @@ async function completeSetup(stripe, session) {
   const current = await prisma.consentForm.findUnique({
     where: { id: registration.id },
   });
-  if (current.stripeSubscriptionStatus === "canceled") {
+  if (current.archivedAt || current.stripeSubscriptionStatus === "canceled") {
     await stripe.subscriptionSchedules.cancel(schedule.id, {
       invoice_now: false,
       prorate: false,
