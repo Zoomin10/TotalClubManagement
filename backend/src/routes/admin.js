@@ -94,6 +94,7 @@ router.get("/registrations", requireAdmin, async (req, res) => {
 
 router.delete("/registrations/:id", requireAdmin, async (req, res) => {
   try {
+    if (await prisma.seasonMembership.count({where:{registrationId:req.params.id}})) return res.status(409).json({error:"Season history must be retained. Mark the member as left instead."});
     const frontendUrl = process.env.FRONTEND_URL;
 
     if (
@@ -533,6 +534,11 @@ router.post(
 
       if (!registration) {
         return res.status(404).json({ error: "Registration not found" });
+      }
+
+      if (await prisma.seasonMembership.count({where:{registrationId:registration.id}})) {
+        await require("../services/seasons").leaveAll(registration.id,req.trudashAdmin.username);
+        return res.json({success:true,message:"Current and future seasonal payments cancelled. Registration and invoices retained."});
       }
 
       if (

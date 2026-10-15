@@ -27,15 +27,14 @@ async function syncMembershipInvoice(stripe, invoiceId, event = null) {
 
           const subscriptionId = objectId(
             invoice.parent?.subscription_details?.subscription ||
-              invoice.subscription
+              invoice.subscription,
           );
 
           // Ignore invoices unrelated to subscriptions.
           if (!subscriptionId) return null;
 
-          const subscription = await stripe.subscriptions.retrieve(
-            subscriptionId
-          );
+          const subscription =
+            await stripe.subscriptions.retrieve(subscriptionId);
 
           const registrationId = subscription.metadata?.registrationId;
 
@@ -50,39 +49,55 @@ async function syncMembershipInvoice(stripe, invoiceId, event = null) {
             throw new Error("Invoice registration was not found");
           }
 
+          const membership = subscription.metadata?.seasonMembershipId
+            ? await tx.seasonMembership.findUnique({
+                where: { id: subscription.metadata.seasonMembershipId },
+              })
+            : await tx.seasonMembership.findUnique({
+                where: { stripeSubscriptionId: subscriptionId },
+              });
+          if (
+            membership &&
+            (membership.registrationId !== registrationId ||
+              (membership.stripeSubscriptionId &&
+                membership.stripeSubscriptionId !== subscriptionId) ||
+              (!membership.stripeSubscriptionId &&
+                membership.stripeScheduleId !==
+                  objectId(subscription.schedule)))
+          ) {
+            throw new Error("Invoice season ownership mismatch");
+          }
+          if (subscription.metadata?.seasonMembershipId && !membership)
+            throw new Error("Invoice season not found");
           if (
             registration.stripeCustomerId !== objectId(invoice.customer) ||
-            registration.stripeCustomerId !==
-              objectId(subscription.customer) ||
-            (registration.stripeSubscriptionId &&
+            registration.stripeCustomerId !== objectId(subscription.customer) ||
+            (!membership &&
+              registration.stripeSubscriptionId &&
               registration.stripeSubscriptionId !== subscriptionId)
           ) {
             throw new Error("Invoice does not match the registration");
           }
 
-          if (
-            existing &&
-            existing.registrationId !== registrationId
-          ) {
-            throw new Error("Invoice is already linked to another registration");
+          if (existing && existing.registrationId !== registrationId) {
+            throw new Error(
+              "Invoice is already linked to another registration",
+            );
           }
 
-          let lastPaymentFailedAt =
-            existing?.lastPaymentFailedAt ?? null;
+          let lastPaymentFailedAt = existing?.lastPaymentFailedAt ?? null;
 
           if (event?.type === "invoice.payment_failed") {
             const failedAt = stripeDate(event.created);
 
-            if (
-              !lastPaymentFailedAt ||
-              failedAt > lastPaymentFailedAt
-            ) {
+            if (!lastPaymentFailedAt || failedAt > lastPaymentFailedAt) {
               lastPaymentFailedAt = failedAt;
             }
           }
 
           const data = {
             registrationId,
+            seasonMembershipId: membership?.id ?? null,
             stripeSubscriptionId: subscriptionId,
             invoiceNumber: invoice.number ?? null,
             currency: invoice.currency,
@@ -112,7 +127,7 @@ async function syncMembershipInvoice(stripe, invoiceId, event = null) {
           isolationLevel: "Serializable",
           maxWait: 5000,
           timeout: 20000,
-        }
+        },
       );
     } catch (error) {
       if (error.code === "P2034" && attempt < 2) continue;

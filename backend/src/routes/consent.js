@@ -18,9 +18,7 @@ const ageGroups = [
   "u18",
   "adult",
 ];
-const {
-  createRegistrationCheckout,
-} = require("../services/stripeService");
+const { createRegistrationCheckout } = require("../services/stripeService");
 
 const {
   sendRegistrationNotification,
@@ -28,62 +26,51 @@ const {
 
 const contactSchema = z.object({
   name: z.string().trim().min(1).max(100),
- dob: z.coerce.date().refine(
-  (date) => date <= new Date(),
-  {
+  dob: z.coerce.date().refine((date) => date <= new Date(), {
     message: "Date of birth cannot be in the future",
-  }
-),
- phoneNumber: z
-  .string()
-  .trim()
-  .regex(
-    /^(\+44|0)[\d\s()-]{9,18}$/,
-    "Please enter a valid UK telephone number"
-  ),
-postcode: z
-  .string()
-  .trim()
-  .toUpperCase()
-  .regex(
-    /^[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}$/,
-    "Please enter a valid UK postcode"
-  ),
+  }),
+  phoneNumber: z
+    .string()
+    .trim()
+    .regex(
+      /^(\+44|0)[\d\s()-]{9,18}$/,
+      "Please enter a valid UK telephone number",
+    ),
+  postcode: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(
+      /^[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}$/,
+      "Please enter a valid UK postcode",
+    ),
   houseNumber: z.string().trim().min(1).max(50),
   email: z.string().trim().email().max(150),
-  relationship: z.enum([
-  "Mother",
-  "Father",
-  "Carer",
-]),
+  relationship: z.enum(["Mother", "Father", "Carer"]),
 });
 
-
 const consentFormSchema = z.object({
+  seasonId: z.string().optional(),
+  seasonAgreementAccepted: z.boolean().optional(),
+  medicalConsent: z.boolean().optional(),
   ageGroup: z.enum(ageGroups),
-wwfcTeam: z.string().trim().min(1).max(100),
+  wwfcTeam: z.string().trim().min(1).max(100),
   playerFirstName: z.string().trim().min(1).max(60),
   playerSurname: z.string().trim().min(1).max(60),
-playerDob: z.coerce.date().refine(
-  (date) => date <= new Date(),
-  {
+  playerDob: z.coerce.date().refine((date) => date <= new Date(), {
     message: "Player date of birth cannot be in the future",
-  }
-),
+  }),
   playerSex: z.enum(["Male", "Female"]),
-paymentPlan: z.enum([
-  "MATCHES_AND_TRAINING",
-  "TRAINING_ONLY",
-]),
+  paymentPlan: z.enum(["MATCHES_AND_TRAINING", "TRAINING_ONLY"]),
   emergencyContact1: contactSchema,
   emergencyContact2: contactSchema,
 
-postcode: z.string().trim().max(12).optional().default(""),
-houseNumber: z.string().trim().max(50).optional().default(""),
-email: z.union([
-  z.string().trim().email().max(150),
-  z.literal("")
-]).optional().default(""),
+  postcode: z.string().trim().max(12).optional().default(""),
+  houseNumber: z.string().trim().max(50).optional().default(""),
+  email: z
+    .union([z.string().trim().email().max(150), z.literal("")])
+    .optional()
+    .default(""),
 
   medicalInfo: z.string().trim().max(1000).default(""),
   allergies: z.string().trim().max(1000).optional().nullable(),
@@ -93,19 +80,19 @@ email: z.union([
   consentData: z.boolean(),
   consentPhotos: z.boolean(),
   consentVideos: z.boolean(),
-consentWalkHome: z.boolean().nullable().optional(),
+  consentWalkHome: z.boolean().nullable().optional(),
   parentSignature: z.string().trim().min(1).max(100),
   parentName: z.string().trim().min(1).max(100),
   signatureDate: z.coerce.date().refine(
-  (date) => {
-    const today = new Date();
-    today.setHours(23, 59, 59, 999);
-    return date <= today;
-  },
-  {
-    message: "Signature date cannot be in the future",
-  }
-),
+    (date) => {
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      return date <= today;
+    },
+    {
+      message: "Signature date cannot be in the future",
+    },
+  ),
 });
 
 const { DateTime } = require("luxon");
@@ -136,6 +123,42 @@ router.post("/", async (req, res) => {
     }
 
     const data = parsed.data;
+    const seasons = require("../services/seasons");
+    const offer = await seasons.newOffer();
+    if (
+      offer &&
+      (data.seasonId !== offer.id || data.seasonAgreementAccepted !== true)
+    )
+      return res
+        .status(400)
+        .json({
+          error:
+            "Review and accept the current season terms before registering",
+        });
+    if (
+      offer &&
+      (data.medicalInfo || data.allergies) &&
+      data.medicalConsent !== true
+    )
+      return res
+        .status(400)
+        .json({
+          error:
+            "Explicit consent is required for declared medical information",
+        });
+    const season = offer
+      ? await prisma.clubSeason.findUnique({
+          where: { id: offer.id },
+          include: { plans: true },
+        })
+      : null;
+    const plan = season?.plans.find((p) => p.paymentPlan === data.paymentPlan);
+    if (plan)
+      await seasons.checkPrice(
+        require("../services/stripeService").getStripe(),
+        plan.stripePriceId,
+        plan.amountPence,
+      );
 
     const result = await prisma.consentForm.create({
       data: {
@@ -145,8 +168,6 @@ router.post("/", async (req, res) => {
         playerSurname: data.playerSurname,
         playerDob: data.playerDob,
         playerSex: data.playerSex,
-
-      
 
         emergencyContact1: data.emergencyContact1,
         emergencyContact2: data.emergencyContact2,
@@ -169,44 +190,67 @@ router.post("/", async (req, res) => {
         parentName: data.parentName,
         signatureDate: data.signatureDate,
         paymentPlan: data.paymentPlan,
-monthlyAmountPence: paymentPlans[data.paymentPlan],
-firstPaymentDate: getFirstPaymentDate(),
+        monthlyAmountPence: plan?.amountPence ?? paymentPlans[data.paymentPlan],
+        firstPaymentDate: offer?.firstPaymentDate ?? getFirstPaymentDate(),
+        ...(season
+          ? {
+              seasonMemberships: {
+                create: {
+                  seasonId: season.id,
+                  state: "ACCEPTED",
+                  origin: "NEW_REGISTRATION",
+                  paymentPlan: data.paymentPlan,
+                  amountPence: plan.amountPence,
+                  stripePriceId: plan.stripePriceId,
+                  firstPaymentDate: offer.firstPaymentDate,
+                  acceptedAt: new Date(),
+                  acceptedBy: data.parentName,
+                  termsVersion: season.termsVersion,
+                  termsContent: season.termsContent,
+                  medicalConsent: data.medicalConsent === true,
+                  permissions: {
+                    consentData: data.consentData,
+                    consentPhotos: data.consentPhotos,
+                    consentVideos: data.consentVideos,
+                    consentWalkHome: data.consentWalkHome ?? null,
+                  },
+                },
+              },
+            }
+          : {}),
       },
     });
 
-      sendRegistrationNotification(result).catch((error) => {
+    sendRegistrationNotification(result).catch((error) => {
       console.error(
         "Registration saved, but notification email failed:",
-        error
+        error,
       );
     });
 
- let checkoutUrl = null;
+    let checkoutUrl = null;
 
-try {
-  checkoutUrl = await createRegistrationCheckout(result);
-} catch (error) {
-  console.error(
-    "Registration saved, but Stripe setup failed:",
-    error.message
-  );
-}
+    try {
+      checkoutUrl = await createRegistrationCheckout(result);
+    } catch (error) {
+      console.error(
+        "Registration saved, but Stripe setup failed:",
+        error.message,
+      );
+    }
 
-res.status(201).json({
-  registrationId: result.id,
-  checkoutUrl,
-  paymentSetupRequired: true,
-});
-
+    res.status(201).json({
+      registrationId: result.id,
+      checkoutUrl,
+      paymentSetupRequired: true,
+    });
   } catch (err) {
     console.error("Failed to save consent form:", err);
 
-    res.status(500).json({
-      error: "Failed to save consent form",
+    res.status(err.statusCode || 500).json({
+      error: err.statusCode ? err.message : "Failed to save consent form",
     });
   }
 });
-
-
 
 module.exports = router;

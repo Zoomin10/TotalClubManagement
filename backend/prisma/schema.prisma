@@ -53,13 +53,16 @@ model ConsentForm {
 
   // Subscription state; separate from successful payment history
   stripeSubscriptionStatus String?
+  seasonMemberships        SeasonMembership[]
   invoices                 MembershipInvoice[]
 }
 
 model MembershipInvoice {
-  id             String      @id @default(cuid())
-  registrationId String
-  registration   ConsentForm @relation(fields: [registrationId], references: [id], onDelete: Restrict)
+  seasonMembershipId String?
+  seasonMembership   SeasonMembership? @relation(fields: [seasonMembershipId], references: [id], onDelete: Restrict)
+  id                 String            @id @default(cuid())
+  registrationId     String
+  registration       ConsentForm       @relation(fields: [registrationId], references: [id], onDelete: Restrict)
 
   stripeInvoiceId      String  @unique
   stripeSubscriptionId String
@@ -156,6 +159,75 @@ model ReportExportAudit {
   actor       String
   report      String
   recordCount Int
+
+  @@index([createdAt])
+}
+
+model ClubSeason {
+  id           String             @id @default(cuid())
+  startYear    Int                @unique
+  label        String
+  startsAt     DateTime
+  endsAt       DateTime
+  status       String             @default("DRAFT")
+  termsVersion String
+  termsContent String
+  createdAt    DateTime           @default(now())
+  plans        SeasonPlan[]
+  memberships  SeasonMembership[]
+}
+
+model SeasonPlan {
+  id            String      @id @default(cuid())
+  seasonId      String
+  season        ClubSeason  @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  paymentPlan   PaymentPlan
+  amountPence   Int
+  stripePriceId String
+
+  @@unique([seasonId, paymentPlan])
+}
+
+model SeasonMembership {
+  id                      String              @id @default(cuid())
+  registrationId          String
+  registration            ConsentForm         @relation(fields: [registrationId], references: [id], onDelete: Restrict)
+  seasonId                String
+  season                  ClubSeason          @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  paymentPlan             PaymentPlan?
+  amountPence             Int?
+  stripePriceId           String?
+  state                   String              @default("OFFERED")
+  origin                  String              @default("RENEWAL")
+  firstPaymentDate        DateTime?
+  acceptedAt              DateTime?
+  acceptedBy              String?
+  termsVersion            String?
+  termsContent            String?
+  permissions             Json?
+  medicalConsent          Boolean             @default(false)
+  leftAt                  DateTime?
+  stripeScheduleId        String?             @unique
+  stripeSubscriptionId    String?             @unique
+  stripeCheckoutSessionId String?             @unique
+  billingStatus           String?
+  tokenHash               String?             @unique
+  tokenExpiresAt          DateTime?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  invoices                MembershipInvoice[]
+
+  @@unique([registrationId, seasonId])
+}
+
+model SeasonChange {
+  id             String   @id @default(cuid())
+  createdAt      DateTime @default(now())
+  actor          String
+  action         String
+  seasonId       String?
+  registrationId String?
+  details        Json
 
   @@index([createdAt])
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 import Admin from "./Admin";
 
@@ -52,32 +52,51 @@ const initialForm = {
 };
 
 function App() {
-    if (window.location.pathname === "/admin") {
-  return <Admin />;
-}
+  if (window.location.pathname === "/admin") {
+    return <Admin />;
+  }
   const [form, setForm] = useState(initialForm);
-const [status, setStatus] = useState("");
-const [validationError, setValidationError] = useState("");
-const walkHomeEligible =
-  Number(String(form.ageGroup).replace("u", "")) >= 11;
- function updateField(name, value) {
-  setForm((prev) => {
-    const next = {
-      ...prev,
-      [name]: value,
+  const [seasonOffer, setSeasonOffer] = useState(null);
+  const [offerError, setOfferError] = useState("Loading membership plans…");
+  useEffect(() => {
+    let active = true;
+    fetch(`${API_URL}/api/seasons/offer`)
+      .then(async (r) => {
+        const d = await r.json();
+        if (!r.ok) throw Error(d.error || "Membership plans unavailable");
+        if (active) {
+          setSeasonOffer(d.offer);
+          setOfferError("");
+        }
+      })
+      .catch((e) => {
+        if (active) setOfferError(e.message);
+      });
+    return () => {
+      active = false;
     };
+  }, []);
+  const [status, setStatus] = useState("");
+  const [validationError, setValidationError] = useState("");
+  const walkHomeEligible = Number(String(form.ageGroup).replace("u", "")) >= 11;
+  function updateField(name, value) {
+    setForm((prev) => {
+      const next = {
+        ...prev,
+        [name]: value,
+      };
 
-    if (name === "ageGroup") {
-      const age = Number(String(value).replace("u", ""));
+      if (name === "ageGroup") {
+        const age = Number(String(value).replace("u", ""));
 
-      if (age < 11) {
-        next.consentWalkHome = "";
+        if (age < 11) {
+          next.consentWalkHome = "";
+        }
       }
-    }
 
-    return next;
-  });
-}
+      return next;
+    });
+  }
 
   function updateContact(contactKey, field, value) {
     setForm((prev) => ({
@@ -91,17 +110,20 @@ const walkHomeEligible =
 
   async function handleSubmit(e) {
     e.preventDefault();
+    if (offerError) {
+      setStatus(offerError);
+      return;
+    }
     setStatus("Submitting...");
 
     const payload = {
       ...form,
+      seasonId: seasonOffer?.id,
       wwfcTeam: form.wwfcTeam,
       consentData: form.consentData === "Yes",
       consentPhotos: form.consentPhotos === "Yes",
       consentVideos: form.consentVideos === "Yes",
-      consentWalkHome: walkHomeEligible
-  ? form.consentWalkHome === "Yes"
-  : null,
+      consentWalkHome: walkHomeEligible ? form.consentWalkHome === "Yes" : null,
     };
 
     try {
@@ -111,57 +133,59 @@ const walkHomeEligible =
         body: JSON.stringify(payload),
       });
 
-if (!res.ok) {
-  try {
-    const errorData = await res.json();
+      if (!res.ok) {
+        try {
+          const errorData = await res.json();
 
-    const fieldErrors = errorData?.details?.fieldErrors;
+          const fieldErrors = errorData?.details?.fieldErrors;
 
-    if (fieldErrors) {
-      const firstError = Object.values(fieldErrors)
-        .flat()
-        .find(Boolean);
+          if (fieldErrors) {
+            const firstError = Object.values(fieldErrors).flat().find(Boolean);
 
-      setValidationError(firstError || "");
+            setValidationError(firstError || "");
+          }
+        } catch (err) {
+          console.error(err);
+        }
+
+        setStatus(
+          "Some of the information entered appears to be incomplete or incorrect. Please review the form and ensure all required details are accurate.",
+        );
+
+        return;
+      }
+      const result = await res.json();
+
+      setValidationError("");
+      setForm(initialForm);
+
+      if (result.checkoutUrl) {
+        setStatus("Registration saved. Opening secure payment setup...");
+        window.location.assign(result.checkoutUrl);
+        return;
+      }
+
+      setStatus(
+        `Registration saved. Payment setup could not start. ` +
+          `Please contact the club quoting reference ${result.registrationId}. ` +
+          `Do not submit another registration.`,
+      );
+    } catch (err) {
+      console.error(err);
+      setStatus(
+        "Sorry, we could not submit the form right now. Please try again in a few minutes.",
+      );
     }
-  } catch (err) {
-    console.error(err);
-  }
-
-  setStatus(
-    "Some of the information entered appears to be incomplete or incorrect. Please review the form and ensure all required details are accurate."
-  );
-
-  return;
-}
-const result = await res.json();
-
-setValidationError("");
-setForm(initialForm);
-
-if (result.checkoutUrl) {
-  setStatus("Registration saved. Opening secure payment setup...");
-  window.location.assign(result.checkoutUrl);
-  return;
-}
-
-setStatus(
-  `Registration saved. Payment setup could not start. ` +
-  `Please contact the club quoting reference ${result.registrationId}. ` +
-  `Do not submit another registration.`
-);
-} catch (err) {
-  console.error(err);
-  setStatus(
-    "Sorry, we could not submit the form right now. Please try again in a few minutes."
-  );
-}
   }
 
   return (
     <main className="page">
       <section className="card">
-        <img src="/wwfc-letter-head.png" alt="Wroughton & Wichelstowe Football Club" className="logo" />
+        <img
+          src="/wwfc-letter-head.png"
+          alt="Wroughton & Wichelstowe Football Club"
+          className="logo"
+        />
 
         <h1>Player Membership Registration</h1>
         <p className="intro">
@@ -174,229 +198,349 @@ setStatus(
           <div className="grid">
             <label>
               Age Group
-            <select
-  required
-  value={form.ageGroup}
-  onChange={(e) => updateField("ageGroup", e.target.value)}
->
-  <option value="">Please Select</option>
+              <select
+                required
+                value={form.ageGroup}
+                onChange={(e) => updateField("ageGroup", e.target.value)}
+              >
+                <option value="">Please Select</option>
 
-  {["u7","u8","u9","u10","u11","u12","u13","u14","u15","u16","u17","u18","adult"].map((age) => (
-    <option key={age} value={age}>
-      {age.toUpperCase()}
-    </option>
-  ))}
-</select>
+                {[
+                  "u7",
+                  "u8",
+                  "u9",
+                  "u10",
+                  "u11",
+                  "u12",
+                  "u13",
+                  "u14",
+                  "u15",
+                  "u16",
+                  "u17",
+                  "u18",
+                  "adult",
+                ].map((age) => (
+                  <option key={age} value={age}>
+                    {age.toUpperCase()}
+                  </option>
+                ))}
+              </select>
             </label>
 
-<label>
-  WWFC Team
-  <select
-    required
-    value={form.wwfcTeam}
-    onChange={(e) => updateField("wwfcTeam", e.target.value)}
-  >
-    <option value="">Select Team</option>
-<option>Rebels</option>
-    <option>Black Cats</option>
-    <option>Wild Cats</option>
-    <option>Panthers</option>
-    <option>Rams</option>
-    <option>Rhinos</option>
-      <option>Rangers</option>
-    <option>Rockets</option>
-    <option>Dragons</option>
-    <option>Thunder</option>
-       <option>Foxes</option>
-      <option>Lightning</option>
-    <option>Wookies</option>
-    <option>Warriors</option>
-    <option>Magic</option>
-      <option>Witches</option>
-    <option>Lions</option>
-    <option>Wasps</option>
-    <option>Wolves</option>
-      <option>Hurricanes</option>
-    <option>Tornadoes</option>
-    <option>Silverbacks</option>
-    <option>Broncos</option>   
-    <option>Wrens</option>
-    <option>Ravens</option>
-       <option>U18</option>
-       <option>Mens</option>
-        <option>Other (not listed)</option>
+            <label>
+              WWFC Team
+              <select
+                required
+                value={form.wwfcTeam}
+                onChange={(e) => updateField("wwfcTeam", e.target.value)}
+              >
+                <option value="">Select Team</option>
+                <option>Rebels</option>
+                <option>Black Cats</option>
+                <option>Wild Cats</option>
+                <option>Panthers</option>
+                <option>Rams</option>
+                <option>Rhinos</option>
+                <option>Rangers</option>
+                <option>Rockets</option>
+                <option>Dragons</option>
+                <option>Thunder</option>
+                <option>Foxes</option>
+                <option>Lightning</option>
+                <option>Wookies</option>
+                <option>Warriors</option>
+                <option>Magic</option>
+                <option>Witches</option>
+                <option>Lions</option>
+                <option>Wasps</option>
+                <option>Wolves</option>
+                <option>Hurricanes</option>
+                <option>Tornadoes</option>
+                <option>Silverbacks</option>
+                <option>Broncos</option>
+                <option>Wrens</option>
+                <option>Ravens</option>
+                <option>U18</option>
+                <option>Mens</option>
+                <option>Other (not listed)</option>
 
-    {/* etc */}
-  </select>
-</label>
+                {/* etc */}
+              </select>
+            </label>
 
             <label>
               Gender
-          <select
-  required
-  value={form.playerSex}
-  onChange={(e) => updateField("playerSex", e.target.value)}
->
-  <option value="">Please Select</option>
-  <option value="Male">Male</option>
-  <option value="Female">Female</option>
-</select>
+              <select
+                required
+                value={form.playerSex}
+                onChange={(e) => updateField("playerSex", e.target.value)}
+              >
+                <option value="">Please Select</option>
+                <option value="Male">Male</option>
+                <option value="Female">Female</option>
+              </select>
             </label>
 
             <label>
               First Name
-              <input required value={form.playerFirstName} onChange={(e) => updateField("playerFirstName", e.target.value)} />
+              <input
+                required
+                value={form.playerFirstName}
+                onChange={(e) => updateField("playerFirstName", e.target.value)}
+              />
             </label>
 
             <label>
               Surname
-              <input required value={form.playerSurname} onChange={(e) => updateField("playerSurname", e.target.value)} />
+              <input
+                required
+                value={form.playerSurname}
+                onChange={(e) => updateField("playerSurname", e.target.value)}
+              />
             </label>
 
             <label>
               Date of Birth
-              <input required type="date" value={form.playerDob} onChange={(e) => updateField("playerDob", e.target.value)} />
+              <input
+                required
+                type="date"
+                value={form.playerDob}
+                onChange={(e) => updateField("playerDob", e.target.value)}
+              />
             </label>
           </div>
 
-          <ContactSection title="Emergency Contact 1" data={form.emergencyContact1} onChange={(field, value) => updateContact("emergencyContact1", field, value)} />
-          <ContactSection title="Emergency Contact 2" data={form.emergencyContact2} onChange={(field, value) => updateContact("emergencyContact2", field, value)} />
+          <ContactSection
+            title="Emergency Contact 1"
+            data={form.emergencyContact1}
+            onChange={(field, value) =>
+              updateContact("emergencyContact1", field, value)
+            }
+          />
+          <ContactSection
+            title="Emergency Contact 2"
+            data={form.emergencyContact2}
+            onChange={(field, value) =>
+              updateContact("emergencyContact2", field, value)
+            }
+          />
 
-<h2>Membership Payment Plan</h2>
+          <h2>Membership Payment Plan</h2>
+          {offerError && <p role="alert">{offerError}</p>}
+          {seasonOffer && (
+            <section>
+              <h3>Season {seasonOffer.label}</h3>
+              <p>
+                First payment:{" "}
+                {new Date(seasonOffer.firstPaymentDate).toLocaleDateString(
+                  "en-GB",
+                  { timeZone: "Europe/London" },
+                )}
+                . Final scheduled payment: 1 May{" "}
+                {new Date(seasonOffer.endsAt).getUTCFullYear()}. You must renew
+                separately for the next season.
+              </p>
+              <details>
+                <summary>Season terms — {seasonOffer.termsVersion}</summary>
+                <p style={{ whiteSpace: "pre-wrap" }}>
+                  {seasonOffer.termsContent}
+                </p>
+              </details>
+              <label>
+                <input
+                  type="checkbox"
+                  required
+                  checked={form.seasonAgreementAccepted || false}
+                  onChange={(e) =>
+                    updateField("seasonAgreementAccepted", e.target.checked)
+                  }
+                />{" "}
+                I accept these season terms and the selected monthly fee. Future
+                payments stop if the member leaves; existing arrears remain
+                payable.
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={form.medicalConsent || false}
+                  onChange={(e) =>
+                    updateField("medicalConsent", e.target.checked)
+                  }
+                />{" "}
+                I explicitly consent to the club recording the medical
+                conditions and allergies I declare for player safety, as
+                explained in the privacy notice. I can withdraw this consent by
+                contacting the club.
+              </label>
+            </section>
+          )}
 
-<label>
-  Payment Plan
-  <select
-    required
-    value={form.paymentPlan}
-    onChange={(e) => updateField("paymentPlan", e.target.value)}
-  >
-    <option value="">Select a payment plan</option>
-    <option value="MATCHES_AND_TRAINING">
-      Matches &amp; Training — £21 per month
-    </option>
-    <option value="TRAINING_ONLY">
-      Training only — £11 per month
-    </option>
-  </select>
-</label>
+          <label>
+            Payment Plan
+            <select
+              required
+              value={form.paymentPlan}
+              onChange={(e) => updateField("paymentPlan", e.target.value)}
+            >
+              <option value="">Select a payment plan</option>
+              <option value="MATCHES_AND_TRAINING">
+                Matches &amp; Training — £
+                {(
+                  (seasonOffer?.plans.find(
+                    (p) => p.paymentPlan === "MATCHES_AND_TRAINING",
+                  )?.amountPence ?? 2100) / 100
+                ).toFixed(2)}{" "}
+                per month
+              </option>
+              <option value="TRAINING_ONLY">
+                Training only — £
+                {(
+                  (seasonOffer?.plans.find(
+                    (p) => p.paymentPlan === "TRAINING_ONLY",
+                  )?.amountPence ?? 1100) / 100
+                ).toFixed(2)}{" "}
+                per month
+              </option>
+            </select>
+          </label>
 
-<p className="intro">
-  Monthly payments start on the 1st of the month following registration,
-  then continue on the 1st of each month. There is no charge for the
-  month you register.
-</p>
+          <p className="intro">
+            Monthly payments start on the 1st of the month following
+            registration, then continue on the 1st of each month. There is no
+            charge for the month you register.
+          </p>
 
           <h2>Medical Information</h2>
 
           <label>
-            Important Medical Information, including medication and times to be administered
-            <textarea required value={form.medicalInfo} onChange={(e) => updateField("medicalInfo", e.target.value)} />
+            Important Medical Information, including medication and times to be
+            administered
+            <textarea
+              required
+              value={form.medicalInfo}
+              onChange={(e) => updateField("medicalInfo", e.target.value)}
+            />
           </label>
 
           <label>
             Allergies, including food intolerances
-            <textarea value={form.allergies} onChange={(e) => updateField("allergies", e.target.value)} />
+            <textarea
+              value={form.allergies}
+              onChange={(e) => updateField("allergies", e.target.value)}
+            />
           </label>
 
           <h2>Permissions</h2>
 
-          <YesNo label="I give permission for these details to be kept by Wroughton & Wichelstowe FC for contact purposes." value={form.consentData} onChange={(v) => updateField("consentData", v)} />
-          <YesNo label="I give permission for photographs to be taken and used by Wroughton & Wichelstowe FC." value={form.consentPhotos} onChange={(v) => updateField("consentPhotos", v)} />
-          <YesNo label="I give permission for videos to be taken and used by Wroughton & Wichelstowe FC." value={form.consentVideos} onChange={(v) => updateField("consentVideos", v)} />
-{walkHomeEligible && (
-  <YesNo
-    label="I give permission for my child to leave training, matches, or club activities unaccompanied and make their own way home."
-    value={form.consentWalkHome}
-    onChange={(v) => updateField("consentWalkHome", v)}
-  />
-)}
+          <YesNo
+            label="I give permission for these details to be kept by Wroughton & Wichelstowe FC for contact purposes."
+            value={form.consentData}
+            onChange={(v) => updateField("consentData", v)}
+          />
+          <YesNo
+            label="I give permission for photographs to be taken and used by Wroughton & Wichelstowe FC."
+            value={form.consentPhotos}
+            onChange={(v) => updateField("consentPhotos", v)}
+          />
+          <YesNo
+            label="I give permission for videos to be taken and used by Wroughton & Wichelstowe FC."
+            value={form.consentVideos}
+            onChange={(v) => updateField("consentVideos", v)}
+          />
+          {walkHomeEligible && (
+            <YesNo
+              label="I give permission for my child to leave training, matches, or club activities unaccompanied and make their own way home."
+              value={form.consentWalkHome}
+              onChange={(v) => updateField("consentWalkHome", v)}
+            />
+          )}
 
           <p className="disclaimer">
-              Wroughton & Wichelstowe FC adhere to the England FA guidelines for the use of photos and videos, safeguarding and social media. 
-  For more information, please see the FA guidance for parents and carers{" "}
-  <a 
-    href="https://www.thefa.com/football-rules-governance/safeguarding/section-8-parents-and-carers" 
-    target="_blank" 
-    rel="noreferrer"
-  >
-    here
-  </a>.
+            Wroughton & Wichelstowe FC adhere to the England FA guidelines for
+            the use of photos and videos, safeguarding and social media. For
+            more information, please see the FA guidance for parents and carers{" "}
+            <a
+              href="https://www.thefa.com/football-rules-governance/safeguarding/section-8-parents-and-carers"
+              target="_blank"
+              rel="noreferrer"
+            >
+              here
+            </a>
+            .
           </p>
 
-        <h2>
-  {form.ageGroup === "adult"
-    ? "Player Signature"
-    : "Parent / Carer Signature"}
-</h2>
+          <h2>
+            {form.ageGroup === "adult"
+              ? "Player Signature"
+              : "Parent / Carer Signature"}
+          </h2>
 
           <div className="grid">
             <label>
-  {form.ageGroup === "adult"
-    ? "Player Signature"
-    : "Parent / Carer Signature"}
+              {form.ageGroup === "adult"
+                ? "Player Signature"
+                : "Parent / Carer Signature"}
 
-  <input
-    required
-    value={form.parentSignature}
-    onChange={(e) =>
-      updateField("parentSignature", e.target.value)
-    }
-  />
-</label>
+              <input
+                required
+                value={form.parentSignature}
+                onChange={(e) => updateField("parentSignature", e.target.value)}
+              />
+            </label>
 
-           <label>
-  {form.ageGroup === "adult"
-    ? "Player Name"
-    : "Parent / Carer Name"}
+            <label>
+              {form.ageGroup === "adult"
+                ? "Player Name"
+                : "Parent / Carer Name"}
 
-  <input
-    required
-    value={form.parentName}
-    onChange={(e) =>
-      updateField("parentName", e.target.value)
-    }
-  />
-</label>
+              <input
+                required
+                value={form.parentName}
+                onChange={(e) => updateField("parentName", e.target.value)}
+              />
+            </label>
 
             <label>
               Date of Signature
               <input
-  required
-  type="date"
-  max={new Date().toISOString().split("T")[0]}
-  value={form.signatureDate}
-  onChange={(e) => updateField("signatureDate", e.target.value)}
-/>
+                required
+                type="date"
+                max={new Date().toISOString().split("T")[0]}
+                value={form.signatureDate}
+                onChange={(e) => updateField("signatureDate", e.target.value)}
+              />
             </label>
           </div>
 
-<label className="privacy-check">
-  <input
-    type="checkbox"
-    checked={form.acceptedPrivacyPolicy}
-    onChange={(e) => updateField("acceptedPrivacyPolicy", e.target.checked)}
-    required
-  />
-  <span>
-    I have read and accept the{" "}
-    <a href="/privacy-policy.html" target="_blank" rel="noreferrer">
-      Privacy Policy
-    </a>
-    .
-  </span>
-</label>
-        <button type="submit" disabled={!form.acceptedPrivacyPolicy}>
-  Submit Registration
-</button>
+          <label className="privacy-check">
+            <input
+              type="checkbox"
+              checked={form.acceptedPrivacyPolicy}
+              onChange={(e) =>
+                updateField("acceptedPrivacyPolicy", e.target.checked)
+              }
+              required
+            />
+            <span>
+              I have read and accept the{" "}
+              <a href="/privacy-policy.html" target="_blank" rel="noreferrer">
+                Privacy Policy
+              </a>
+              .
+            </span>
+          </label>
+          <button
+            type="submit"
+            disabled={!form.acceptedPrivacyPolicy || Boolean(offerError)}
+          >
+            Submit Registration
+          </button>
 
           {status && <p className="status">{status}</p>}
 
-{validationError && (
-  <p className="validation-error">
-    {validationError}
-  </p>
-)}
+          {validationError && (
+            <p className="validation-error">{validationError}</p>
+          )}
         </form>
       </section>
     </main>
@@ -409,37 +553,39 @@ function ContactSection({ title, data, onChange }) {
       <h2>{title}</h2>
       <div className="grid">
         {[
-  ["name", "Name"],
-  ["dob", "Date of Birth"],
-  ["phoneNumber", "Phone Number"],
-  ["postcode", "Post Code"],
-  ["houseNumber", "House Number"],
-  ["email", "Email Address"],
-].map(([field, label]) => (
-  <label key={field}>
-    {label}
-    <input
-      required
-      type={field === "dob" ? "date" : field === "email" ? "email" : "text"}
-      value={data[field]}
-      onChange={(e) => onChange(field, e.target.value)}
-    />
-  </label>
-))}
+          ["name", "Name"],
+          ["dob", "Date of Birth"],
+          ["phoneNumber", "Phone Number"],
+          ["postcode", "Post Code"],
+          ["houseNumber", "House Number"],
+          ["email", "Email Address"],
+        ].map(([field, label]) => (
+          <label key={field}>
+            {label}
+            <input
+              required
+              type={
+                field === "dob" ? "date" : field === "email" ? "email" : "text"
+              }
+              value={data[field]}
+              onChange={(e) => onChange(field, e.target.value)}
+            />
+          </label>
+        ))}
 
-<label>
-  Relationship to Player
-  <select
-    required
-    value={data.relationship}
-    onChange={(e) => onChange("relationship", e.target.value)}
-  >
-    <option value="">Select...</option>
-    <option value="Mother">Mother</option>
-    <option value="Father">Father</option>
-    <option value="Carer">Carer</option>
-  </select>
-</label>
+        <label>
+          Relationship to Player
+          <select
+            required
+            value={data.relationship}
+            onChange={(e) => onChange("relationship", e.target.value)}
+          >
+            <option value="">Select...</option>
+            <option value="Mother">Mother</option>
+            <option value="Father">Father</option>
+            <option value="Carer">Carer</option>
+          </select>
+        </label>
       </div>
     </>
   );

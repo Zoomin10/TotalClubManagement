@@ -19,27 +19,47 @@ function setupConflict(message) {
 
 async function createRegistrationCheckout(registration) {
   // Read fresh references so a retry cannot restart existing/cancelled billing.
-  registration = await prisma.consentForm.findUnique({ where: { id: registration.id } });
+  registration = await prisma.consentForm.findUnique({
+    where: { id: registration.id },
+  });
   if (!registration) {
     const error = new Error("Registration not found");
     error.statusCode = 404;
     throw error;
   }
-  if (registration.stripeScheduleId || registration.stripeSubscriptionId || registration.stripeSubscriptionStatus) {
-    throw setupConflict("This member already has billing records. Refresh their subscription status.");
+  const membership = await prisma.seasonMembership.findFirst({
+    where: { registrationId: registration.id, state: "ACCEPTED", leftAt: null },
+    orderBy: { firstPaymentDate: "desc" },
+  });
+  if (membership) return require("./seasons").checkout(membership.id);
+  if (
+    registration.stripeScheduleId ||
+    registration.stripeSubscriptionId ||
+    registration.stripeSubscriptionStatus
+  ) {
+    throw setupConflict(
+      "This member already has billing records. Refresh their subscription status.",
+    );
   }
   const stripe = getStripe();
-  const objectId = (value) => typeof value === "string" ? value : value?.id;
+  const objectId = (value) => (typeof value === "string" ? value : value?.id);
   let previousSession = null;
   if (registration.stripeCheckoutSessionId) {
-    previousSession = await stripe.checkout.sessions.retrieve(registration.stripeCheckoutSessionId);
-    if (previousSession.livemode || previousSession.mode !== "setup" ||
-        previousSession.metadata?.registrationId !== registration.id ||
-        objectId(previousSession.customer) !== registration.stripeCustomerId) {
+    previousSession = await stripe.checkout.sessions.retrieve(
+      registration.stripeCheckoutSessionId,
+    );
+    if (
+      previousSession.livemode ||
+      previousSession.mode !== "setup" ||
+      previousSession.metadata?.registrationId !== registration.id ||
+      objectId(previousSession.customer) !== registration.stripeCustomerId
+    ) {
       throw setupConflict("Checkout does not match this registration");
     }
     if (previousSession.status === "complete") {
-      throw setupConflict("Card setup is already complete. Refresh the member; if they remain awaiting setup, check or retry the Stripe webhook.");
+      throw setupConflict(
+        "Card setup is already complete. Refresh the member; if they remain awaiting setup, check or retry the Stripe webhook.",
+      );
     }
   }
 
@@ -83,70 +103,80 @@ async function createRegistrationCheckout(registration) {
   }
 
   const paymentStart = new Date(registration.firstPaymentDate).getTime();
-  if (!Number.isFinite(paymentStart)) throw setupConflict("First payment date is invalid");
+  if (!Number.isFinite(paymentStart))
+    throw setupConflict("First payment date is invalid");
   let customerId = registration.stripeCustomerId;
   if (customerId) {
     const customer = await stripe.customers.retrieve(customerId);
-    if (customer.deleted || customer.livemode || customer.metadata?.registrationId !== registration.id) {
+    if (
+      customer.deleted ||
+      customer.livemode ||
+      customer.metadata?.registrationId !== registration.id
+    ) {
       throw setupConflict("Stripe customer does not match this registration");
     }
     let billingNow = Date.now();
     const clockId = objectId(customer.test_clock);
     if (clockId) {
       const clock = await stripe.testHelpers.testClocks.retrieve(clockId);
-      if (clock.status !== "ready") throw setupConflict("Stripe test clock must be ready");
+      if (clock.status !== "ready")
+        throw setupConflict("Stripe test clock must be ready");
       billingNow = clock.frozen_time * 1000;
     }
     if (paymentStart <= billingNow) {
-      throw setupConflict("The original first payment date has passed on this customer's clock. Manual billing review is required; changing the configured clock does not move an existing customer.");
+      throw setupConflict(
+        "The original first payment date has passed on this customer's clock. Manual billing review is required; changing the configured clock does not move an existing customer.",
+      );
     }
   } else if (paymentStart <= Date.now()) {
-    throw setupConflict("The original first payment date has passed. Manual billing review is required.");
+    throw setupConflict(
+      "The original first payment date has passed. Manual billing review is required.",
+    );
   }
   if (previousSession?.status === "open" && previousSession.url) {
     return previousSession.url;
   }
   if (previousSession && previousSession.status !== "expired") {
-    throw setupConflict("Checkout is not ready to resume. Refresh and try again.");
+    throw setupConflict(
+      "Checkout is not ready to resume. Refresh and try again.",
+    );
   }
 
   if (!customerId) {
     const testClockId = process.env.STRIPE_TEST_CLOCK_ID?.trim();
 
-if (testClockId) {
-  const clock = await stripe.testHelpers.testClocks.retrieve(testClockId);
+    if (testClockId) {
+      const clock = await stripe.testHelpers.testClocks.retrieve(testClockId);
 
-  if (clock.status !== "ready") {
-    throw new Error("Stripe test clock must be ready");
-  }
+      if (clock.status !== "ready") {
+        throw new Error("Stripe test clock must be ready");
+      }
 
-  // The registration date is still calculated using real time.
-  // Keep the clock in the same month for this test.
-  const londonMonth = (seconds) =>
-    new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/London",
-      month: "2-digit",
-      year: "numeric",
-    }).format(new Date(seconds * 1000));
+      // The registration date is still calculated using real time.
+      // Keep the clock in the same month for this test.
+      const londonMonth = (seconds) =>
+        new Intl.DateTimeFormat("en-GB", {
+          timeZone: "Europe/London",
+          month: "2-digit",
+          year: "numeric",
+        }).format(new Date(seconds * 1000));
 
-  if (
-    londonMonth(clock.frozen_time) !==
-    londonMonth(Math.floor(Date.now() / 1000))
-  ) {
-    throw new Error(
-      "Test clock must be in the current registration month"
+      if (
+        londonMonth(clock.frozen_time) !==
+        londonMonth(Math.floor(Date.now() / 1000))
+      ) {
+        throw new Error("Test clock must be in the current registration month");
+      }
+    }
+    const customer = await stripe.customers.create(
+      {
+        metadata: { registrationId: registration.id },
+        ...(testClockId ? { test_clock: testClockId } : {}),
+      },
+      {
+        idempotencyKey: `registration-customer-${registration.id}`,
+      },
     );
-  }
-}
- const customer = await stripe.customers.create(
-  {
-    metadata: { registrationId: registration.id },
-    ...(testClockId ? { test_clock: testClockId } : {}),
-  },
-  {
-    idempotencyKey: `registration-customer-${registration.id}`,
-  }
-);
 
     customerId = customer.id;
 
@@ -168,7 +198,7 @@ if (testClockId) {
       mode: "setup",
       currency: "gbp",
       customer: customerId,
-    
+
       client_reference_id: registration.id,
       metadata: {
         registrationId: registration.id,
@@ -195,7 +225,7 @@ if (testClockId) {
       idempotencyKey: previousSession
         ? `registration-checkout-${registration.id}-after-${previousSession.id}`
         : `registration-checkout-${registration.id}`,
-    }
+    },
   );
 
   const saved = await prisma.consentForm.updateMany({
@@ -208,9 +238,14 @@ if (testClockId) {
     },
     data: { stripeCheckoutSessionId: session.id },
   });
-  if (!saved.count) throw setupConflict("Billing details changed. Refresh the member before resuming setup.");
+  if (!saved.count)
+    throw setupConflict(
+      "Billing details changed. Refresh the member before resuming setup.",
+    );
   if (session.status !== "open" || !session.url) {
-    throw setupConflict("Checkout is no longer open. Refresh the member and retry setup if required.");
+    throw setupConflict(
+      "Checkout is no longer open. Refresh the member and retry setup if required.",
+    );
   }
   return session.url;
 }

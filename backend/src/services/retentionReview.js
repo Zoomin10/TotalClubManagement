@@ -32,7 +32,7 @@ async function retentionReview(prisma,now=new Date()){
  for(const member of members){const key={CURRENT_INFERRED_SEASON:'currentInferredSeason',REVIEW_RENEWAL:'reviewRenewal',REVIEW_OLD_REGISTRATION:'reviewOldRegistration',CHECK_REGISTRATION_DATE:'checkRegistrationDate'}[member.state];counts[key]++;}
  return {generatedAt:new Date(now).toISOString(),timeZone:zone,seasonEnd:'31 May',proposedArchiveMonths:12,
   destructiveActionsEnabled:false,
-  notice:'Read-only review. Seasons are inferred from registration dates. Renewal, departure, archive dates and record holds are not recorded. Confirm these separately before deciding what to retain or remove. The 12-month archive period is a proposal.',
+  notice:'Read-only review. This report infers seasons from original registration dates only. Check confirmed renewals and departures in Seasons & renewals; they are not incorporated in this report yet. Archive dates and record holds require separate confirmation before retention decisions. The 12-month archive period is a proposal.',
   counts,members};
 }
 module.exports={reviewRecord,retentionReview};
